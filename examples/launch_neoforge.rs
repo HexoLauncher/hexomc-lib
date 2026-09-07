@@ -1,4 +1,4 @@
-use hexo_mc_lib::*;
+use hexomc_lib::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 

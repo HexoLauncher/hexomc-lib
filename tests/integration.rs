@@ -1,4 +1,4 @@
-use hexo_mc_lib::{
+use hexomc_lib::{
     fetch_version_manifest, install::fabric::get_fabric_loader_versions,
     install::forge::get_forge_versions, install::neoforge::get_neoforge_versions,
 };

@@ -20,7 +20,7 @@ hexo-mc-lib = "0.1"
 安裝並以離線模式啟動 Minecraft：
 
 ```rust
-use hexo_mc_lib::*;
+use hexomc_lib::*;
 use std::path::PathBuf;
 
 #[tokio::main]
