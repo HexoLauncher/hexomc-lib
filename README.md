@@ -4,10 +4,8 @@ Minecraft 啟動器核心的 Rust 函式庫（library，非執行檔）。提供
 
 - **版本** — 查詢 Mojang version manifest 與各版本 JSON
 - **安裝** — Vanilla / Fabric / Forge / NeoForge 安裝
-- **啟動** — 組裝 classpath、解壓 natives、產生 Java `@argfile` 並啟動遊戲
 - **Java** — 偵測本機 Java，或下載 Adoptium Temurin JRE
-- **認證** — Microsoft 登入（Device Code Flow）
-- **模組** — 模組偵測、CurseForge 查詢與自動更新
+- **模組** — 模組偵測，以及 Modrinth / CurseForge 查詢與自動更新
 - **資源** — 資源包 / 光影 / 地圖偵測
 
 ## 安裝

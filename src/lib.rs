@@ -40,7 +40,8 @@ pub use auth::microsoft::{
 
 pub use mods::detector::{detect_mods, ModInfo, ModLoader};
 pub use mods::curseforge::CurseForgeClient;
-pub use mods::updater::{check_updates, update_mod, ModUpdate};
+pub use mods::modrinth::{ModrinthClient, MrProject, MrVersion};
+pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
 
 pub use assets::detector::{
     detect_resource_packs, detect_shader_packs, detect_maps,
