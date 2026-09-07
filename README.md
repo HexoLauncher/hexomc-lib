@@ -1,4 +1,4 @@
-# hexo-mc-lib
+# hexomc-lib
 
 Minecraft 啟動器核心的 Rust 函式庫（library，非執行檔）。提供組裝一個啟動器所需的底層能力：
 
@@ -12,7 +12,7 @@ Minecraft 啟動器核心的 Rust 函式庫（library，非執行檔）。提供
 
 ```toml
 [dependencies]
-hexo-mc-lib = "0.1"
+hexomc-lib = "0.1"
 ```
 
 ## 快速開始

@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::mods::detector::ModLoader;
 
 const MR_BASE: &str = "https://api.modrinth.com/v2";
-const USER_AGENT: &str = concat!("hexo-mc-lib/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("hexomc-lib/", env!("CARGO_PKG_VERSION"));
 
 pub struct ModrinthClient {
     client: reqwest::Client,

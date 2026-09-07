@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`hexo-mc-lib` is a Rust library (not a binary) providing the core of a Minecraft launcher: version manifest queries, vanilla/Fabric/Forge/NeoForge installation, game launching, Java detection/download, Microsoft authentication (Device Code Flow), mod detection + CurseForge lookup + auto-update, and resource-pack/shader/map detection.
+`hexomc-lib` is a Rust library (not a binary) providing the core of a Minecraft launcher: version manifest queries, vanilla/Fabric/Forge/NeoForge installation, game launching, Java detection/download, Microsoft authentication (Device Code Flow), mod detection + CurseForge lookup + auto-update, and resource-pack/shader/map detection.
 
 Source comments and error messages are in Traditional Chinese; follow that convention when adding to existing files.
 

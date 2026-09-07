@@ -166,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_sha1_correct() {
-        let data = b"hello hexo-mc-lib";
+        let data = b"hello hexomc-lib";
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(data).unwrap();
         let expected = sha1_of(data);
@@ -175,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_sha1_wrong_hash() {
-        let data = b"hello hexo-mc-lib";
+        let data = b"hello hexomc-lib";
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(data).unwrap();
         assert!(!verify_sha1(f.path(), "0000000000000000000000000000000000000000").await);
