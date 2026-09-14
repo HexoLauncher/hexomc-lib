@@ -31,7 +31,8 @@ pub use install::loader::{
 pub use java::detector::{find_java, JavaInfo};
 pub use java::installer::download_java;
 
-pub use launch::launcher::{launch, LaunchOptions};
+pub use launch::launcher::{launch, launch_with_channel, launch_with_output, LaunchOptions};
+pub use launch::output::{no_output, GameProcess, OutputFn, OutputKind, OutputLine};
 
 pub use auth::microsoft::{
     request_device_code, poll_device_code, refresh_token,

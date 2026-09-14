@@ -1,14 +1,17 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
+    sync::Arc,
+    time::Duration,
 };
 use uuid::Uuid;
-use tokio::fs;
+use tokio::{fs, sync::mpsc};
 
 use crate::{
     error::{HexoError, Result},
     install::vanilla::InstanceConfig,
+    launch::output::{GameProcess, OutputFn, OutputLine},
 };
 
 #[derive(Debug, Clone)]
@@ -51,7 +54,102 @@ impl LaunchOptions {
 }
 
 /// Launch Minecraft, returning the process handle.
+///
+/// stdout/stderr are inherited from the parent process. Use
+/// [`launch_with_output`] or [`launch_with_channel`] to capture them instead.
+///
+/// The `@argfile` written into `.minecraft/` is deleted a few seconds after the
+/// JVM starts, so the caller must stay alive at least that long for the cleanup
+/// to happen.
 pub async fn launch(options: &LaunchOptions, base_dir: &Path) -> Result<Child> {
+    let Prepared { mut command, argfile } = prepare_command(options, base_dir).await?;
+
+    finish_spawn(command.spawn(), argfile)
+}
+
+/// Launch Minecraft with stdout/stderr piped, delivering them line by line to
+/// `on_output`.
+///
+/// The callback is invoked from tokio tasks (one per stream), so lines from
+/// stdout and stderr may interleave; `OutputLine::kind` says which is which.
+/// [`GameProcess::wait`] waits for the process *and* for every buffered line to
+/// be delivered.
+pub async fn launch_with_output(
+    options: &LaunchOptions,
+    base_dir: &Path,
+    on_output: OutputFn,
+) -> Result<GameProcess> {
+    let Prepared { mut command, argfile } = prepare_command(options, base_dir).await?;
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    let child = finish_spawn(tokio::process::Command::from(command).spawn(), argfile)?;
+
+    Ok(GameProcess::new(child, on_output))
+}
+
+/// Same as [`launch_with_output`], but pushes the lines into a channel instead
+/// of a callback — convenient when the consumer is a UI loop or another task.
+///
+/// The channel is unbounded, so the game never blocks on a slow consumer; drop
+/// the receiver if the output is no longer wanted.
+pub async fn launch_with_channel(
+    options: &LaunchOptions,
+    base_dir: &Path,
+) -> Result<(GameProcess, mpsc::UnboundedReceiver<OutputLine>)> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let sink: OutputFn = Arc::new(move |line| {
+        let _ = tx.send(line);
+    });
+
+    let process = launch_with_output(options, base_dir, sink).await?;
+    Ok((process, rx))
+}
+
+/// Name of the `@argfile`, written into `.minecraft/` (cwd of the game).
+const ARGFILE_NAME: &str = "tempcmd.txt";
+
+/// How long to wait before deleting the `@argfile`. The JVM reads it while
+/// starting up, so it can't be removed immediately after spawn.
+const ARGFILE_CLEANUP_DELAY: Duration = Duration::from_secs(10);
+
+/// A java `Command` ready to spawn, plus the `@argfile` it depends on (None when
+/// args were passed on the command line instead).
+struct Prepared {
+    command: Command,
+    argfile: Option<PathBuf>,
+}
+
+/// Hand back the spawned child, scheduling the `@argfile` for deletion once the
+/// JVM has had time to read it. A failed spawn never read it, so it goes now.
+fn finish_spawn<T>(spawned: std::io::Result<T>, argfile: Option<PathBuf>) -> Result<T> {
+    match spawned {
+        Ok(child) => {
+            if let Some(path) = argfile {
+                tokio::spawn(remove_argfile_after(path, ARGFILE_CLEANUP_DELAY));
+            }
+            Ok(child)
+        }
+        Err(e) => {
+            if let Some(path) = argfile {
+                let _ = std::fs::remove_file(path);
+            }
+            Err(HexoError::Io(e))
+        }
+    }
+}
+
+/// Delete the `@argfile` once `delay` has passed; a missing file is not an error.
+async fn remove_argfile_after(path: PathBuf, delay: Duration) {
+    tokio::time::sleep(delay).await;
+    let _ = fs::remove_file(&path).await;
+}
+
+/// Build the fully-configured java `Command` (classpath, natives, argfile, cwd)
+/// without spawning it — shared by every `launch*` entry point.
+async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Prepared> {
     // Make base_dir absolute (the argfile is read from minecraft_dir, so a relative
     // base_dir would misresolve) and strip the Windows `\\?\` extended-path prefix
     // left by canonicalize, which Java can't parse.
@@ -101,17 +199,17 @@ pub async fn launch(options: &LaunchOptions, base_dir: &Path) -> Result<Child> {
     // the main-class name, so pass args on the command line there instead. The
     // argfile also avoids OS command-length limits; it's relative because cwd is
     // already minecraft_dir.
-    if config.java_version >= 9 {
-        let argfile_path = minecraft_dir.join("tempcmd.txt");
+    let argfile = if config.java_version >= 9 {
+        let argfile_path = minecraft_dir.join(ARGFILE_NAME);
         write_argfile(&final_args, &argfile_path).await?;
-        command.arg("@tempcmd.txt");
+        command.arg(format!("@{}", ARGFILE_NAME));
+        Some(argfile_path)
     } else {
         command.args(&final_args);
-    }
+        None
+    };
 
-    let child = command.spawn().map_err(HexoError::Io)?;
-
-    Ok(child)
+    Ok(Prepared { command, argfile })
 }
 
 fn extract_natives(config: &InstanceConfig, natives_dir: &Path) -> Result<()> {
@@ -311,6 +409,30 @@ mod tests {
         let data = make_data();
         let result = replace_placeholders("-Xmx2G", &data, "Main");
         assert_eq!(result, "-Xmx2G");
+    }
+
+    #[tokio::test]
+    async fn argfile_removed_after_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ARGFILE_NAME);
+        std::fs::write(&path, "-Xmx2G").unwrap();
+
+        remove_argfile_after(path.clone(), Duration::from_millis(10)).await;
+
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn argfile_removed_when_spawn_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ARGFILE_NAME);
+        std::fs::write(&path, "-Xmx2G").unwrap();
+
+        let failed = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let result: Result<Child> = finish_spawn(failed, Some(path.clone()));
+
+        assert!(result.is_err());
+        assert!(!path.exists());
     }
 }
 

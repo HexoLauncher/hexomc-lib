@@ -47,6 +47,8 @@ A launcher root (`base_dir`, e.g. `./mc_data`) contains shared `assets/` and `li
 
 [src/launch/launcher.rs](src/launch/launcher.rs) canonicalizes `base_dir` and strips the Windows `\\?\` extended-path prefix (Java can't parse it) and normalizes to forward slashes. Args are passed via a written `@argfile` to avoid OS command-length limits. Auth token/UUID/XUID on `LaunchOptions` are optional — absent means offline mode (`LaunchOptions::offline(...)`).
 
+All three entry points share `prepare_command` (builds the java `Command` without spawning): `launch` inherits stdio and returns `std::process::Child`; `launch_with_output` / `launch_with_channel` pipe stdout+stderr and return a `GameProcess` ([src/launch/output.rs](src/launch/output.rs)), which delivers `OutputLine { kind, line }` via an `OutputFn` callback or an unbounded channel. `GameProcess::wait` waits for the process *and* drains the reader tasks, so no line is lost.
+
 ## Error handling
 
 All fallible functions return `Result<T> = std::result::Result<T, HexoError>`. `HexoError` ([src/error.rs](src/error.rs)) has `#[from]` conversions for reqwest/io/serde_json/zip, so use `?` freely. Prefer the specific variants (`ChecksumMismatch`, `VersionNotFound`, `JavaNotFound`, `ProcessorFailed`, etc.) over `HexoError::Other`.
