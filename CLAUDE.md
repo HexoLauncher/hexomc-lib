@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`hexomc-lib` is a Rust library (not a binary) providing the core of a Minecraft launcher: version manifest queries, vanilla/Fabric/Forge/NeoForge installation, game launching, Java detection/download, Microsoft authentication (Device Code Flow), mod detection + Modrinth/CurseForge lookup + auto-update, modpack installation (Modrinth `.mrpack`, CurseForge, ATLauncher), and resource-pack/shader/map detection.
+`hexomc-lib` is a Rust library (not a binary) providing the core of a Minecraft launcher: version manifest queries, vanilla/Fabric/Forge/NeoForge installation, game launching, Java detection/download, Microsoft authentication (Device Code Flow), mod detection + Modrinth/CurseForge lookup + auto-update, modpack installation (Modrinth `.mrpack`, CurseForge, ATLauncher, FTB), and resource-pack/shader/map detection.
 
 Write only English doc comments (`///`, `//!`) — no inline `//` comments and no Chinese in new code, including error and progress strings. All Rust sources (`src/`, `examples/`, `tests/`) are English-only; keep them that way. `README.md` is still Chinese by design.
 
@@ -21,7 +21,7 @@ cargo run --example launch_modpack -- <pack.mrpack|pack.zip>   # install + launc
 cargo clippy --all-targets        # lint
 ```
 
-Integration tests (`tests/integration.rs`) are **not** `#[ignore]`d: they hit live Mojang/Fabric/Forge/NeoForge/ATLauncher APIs and run under plain `cargo test`, so use `cargo test --lib` offline. A few network unit tests in `version::manifest` are `#[ignore]`d and need `--ignored`. The examples are the primary end-to-end exercise of the install→launch pipeline and write to `./mc_data`.
+Integration tests (`tests/integration.rs`) are **not** `#[ignore]`d: they hit live Mojang/Fabric/Forge/NeoForge/ATLauncher/FTB APIs and run under plain `cargo test`, so use `cargo test --lib` offline. A few network unit tests in `version::manifest` are `#[ignore]`d and need `--ignored`. The examples are the primary end-to-end exercise of the install→launch pipeline and write to `./mc_data`.
 
 ## Architecture
 
@@ -44,13 +44,16 @@ Installation is built around the `LoaderInstaller` trait in [src/install/loader.
 
 ### Modpacks
 
+Use `install_modpack_files`, `install_mrpack_files`, `install_cfpack_files`, `install_atlauncher_pack_files`, or `install_ftb_pack_files` to import only pack contents. These APIs need no Java, create the game directory themselves, and never create `instance_config.json` or install Minecraft, libraries, assets, or the loader. Existing installers retain full installation behavior. Remote installers reuse the fetched manifest. All `info()` methods reject unsupported loaders, including NeoForge 1.20.1, before content installation. Returned Forge versions are bare; the public `resolve_forge_version` maps them to installer versions for a later `install_with_loader` call.
+
 [src/modpack/mod.rs](src/modpack/mod.rs) holds the shared flow; each format module only parses its metadata into a `ModpackInfo` (MC version, `LoaderType`, bare loader version) and lists files:
 
 - **`mrpack`** — Modrinth `.mrpack` (`modrinth.index.json`, `overrides/` then `client-overrides/`; files with client env `unsupported` are skipped).
 - **`cfpack`** — CurseForge zip (`manifest.json` + overrides). Download URLs come from `CurseForgeClient::get_files`/`get_mods` (API key required); `classId` picks `mods`/`resourcepacks`/`shaderpacks`. Files with a null `downloadUrl` are returned as `ManualDownload`, never fetched via a CDN workaround.
 - **`atpack`** — ATLauncher packs have no file format: `Configs.json` / `Configs.zip` are fetched from `download.nodecdn.net/containers/atl/packs/{safeName}/versions/{version}/`, the version list from `api.atlauncher.com/v1/pack/{safeName}`. That API is behind Cloudflare and returns 403 without a User-Agent. Files carry MD5 (checked after download, since `DownloadTask` only verifies SHA1).
+- **`ftbpack`** — FTB packs have no file format: metadata and version manifests come from `api.feed-the-beast.com/v1/modpacks/public/modpack/{packId}[/{versionId}]`. Installs client files at manifest paths, optionally including optional files. CurseForge references accept numeric or string IDs and are resolved through the supplied client; missing URLs or a missing client yield manual downloads. Entries without any download source are skipped. Pack names come from pack metadata, not the version manifest.
 
-`install_pack_loader` reuses `install_with_loader`; for Forge/NeoForge it installs vanilla first so a `None` `java_path` can be resolved with `find_java(InstanceConfig.java_version)`. Modpacks give bare Forge versions (`47.2.0`), which are mapped to the MC-prefixed strings from `get_forge_versions`. Quilt, LegacyFabric and NeoForge 1.20.1 (old `forge` artifact) return `UnsupportedLoader`. Every pack-provided path goes through `safe_join` / zip `enclosed_name` so a pack can't write outside the instance. Results report `manual_downloads` and `skipped` (unsupported ATLauncher entry types) instead of failing.
+`install_pack_loader` reuses `install_with_loader`; for Forge/NeoForge it installs vanilla first so a `None` `java_path` can be resolved with `find_java(InstanceConfig.java_version)`. Modpacks give bare Forge versions (`47.2.0`), which are mapped to the MC-prefixed strings from `get_forge_versions`. Quilt, LegacyFabric and NeoForge 1.20.1 (old `forge` artifact) return `UnsupportedLoader`. Every pack-provided path goes through `safe_join` / zip `enclosed_name` so a pack can't write outside the instance. Results report `manual_downloads` and `skipped` (unsupported ATLauncher entry types or FTB entries without download sources) instead of failing.
 
 ### On-disk layout
 

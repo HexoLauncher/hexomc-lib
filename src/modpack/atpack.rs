@@ -257,13 +257,13 @@ impl AtPackConfig {
             }
         };
 
-        Ok(ModpackInfo {
+        ModpackInfo {
             name: pack_name.to_string(),
             version: Some(self.version.clone()),
             mc_version: mc.clone(),
             loader,
             loader_version,
-        })
+        }.validated()
     }
 }
 
@@ -327,7 +327,38 @@ pub async fn install_atlauncher_pack(
 
     install_pack_loader(&info, instance_name, base_dir, java_path, progress.clone()).await?;
 
+    install_config_files(&config, safe_name, version, instance_name, base_dir, include_optional, progress).await
+}
+
+/// Download and extract pack contents without installing Minecraft or its loader.
+/// Optional entries follow the same selection rules as [`install_atlauncher_pack`].
+/// No Java is required and `instance_config.json` is not created. Use the returned
+/// [`ModpackInfo`] to install Minecraft and the loader before the first launch.
+pub async fn install_atlauncher_pack_files(
+    safe_name: &str,
+    version: &str,
+    instance_name: &str,
+    base_dir: &Path,
+    include_optional: bool,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
+    let config = fetch_atlauncher_pack_config(safe_name, version).await?;
+    install_config_files(&config, safe_name, version, instance_name, base_dir, include_optional, progress).await
+}
+
+async fn install_config_files(
+    config: &AtPackConfig,
+    safe_name: &str,
+    version: &str,
+    instance_name: &str,
+    base_dir: &Path,
+    include_optional: bool,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
+    let info = config.info(safe_name)?;
+
     let game_dir = instance_game_dir(base_dir, instance_name);
+    tokio::fs::create_dir_all(&game_dir).await?;
     let temp_dir = safe_join(&base_dir.join("temp").join("atlauncher"), &format!("{}-{}", safe_name, version))?;
     tokio::fs::create_dir_all(&temp_dir).await?;
 
@@ -428,6 +459,27 @@ async fn file_md5(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn files_only_preserves_jar_placement_without_installing_loader() {
+        let config: AtPackConfig = serde_json::from_value(serde_json::json!({
+            "version": "1", "minecraft": "1.20.1",
+            "loader": {"type": "forge", "metadata": {"version": "47.2.0"}},
+            "mods": [{"name": "Patch", "file": "patch.jar", "type": "jar", "download": "browser"},
+                {"name": "Forge patch", "file": "forge.jar", "type": "forge", "download": "browser"}]
+        })).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let result = install_config_files(&config, "Test", "1", "test", temp.path(), false, crate::no_progress()).await.unwrap();
+        let game = temp.path().join("instance/test/.minecraft");
+        assert!(game.is_dir());
+        assert_eq!(result.info.loader, LoaderType::Forge);
+        assert_eq!(result.manual_downloads.len(), 2);
+        assert_eq!(result.manual_downloads[0].dest, game.join("jarmods/patch.jar"));
+        assert_eq!(result.manual_downloads[1].dest, game.join("jarmods/forge.jar"));
+        assert!(!temp.path().join("instance/test/instance_config.json").exists());
+        assert!(!temp.path().join("libraries").exists());
+        assert!(!temp.path().join("assets").exists());
+    }
 
     const SAMPLE: &str = r#"{
         "enableCurseIntegration": true,

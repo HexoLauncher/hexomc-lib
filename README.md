@@ -1,11 +1,12 @@
 # hexomc-lib
 
-Minecraft 啟動器核心的 Rust 函式庫（library，非執行檔）。提供組裝一個啟動器所需的底層能力：
+Minecraft 啟動器核心
 
 - **版本** — 查詢 Mojang version manifest 與各版本 JSON
 - **安裝** — Vanilla / Fabric / Forge / NeoForge 安裝
 - **Java** — 偵測本機 Java，或下載 Adoptium Temurin JRE
 - **模組** — 模組偵測，以及 Modrinth / CurseForge 查詢與自動更新
+- **模組包** — Modrinth `.mrpack` / CurseForge zip / ATLauncher / FTB 線上模組包安裝；FTB 使用 pack ID + version ID，支援選裝檔案，無法自動下載的 CurseForge 檔案會回傳手動下載清單
 - **資源** — 資源包 / 光影 / 地圖偵測
 
 ## 安裝
@@ -51,14 +52,4 @@ async fn main() -> Result<()> {
 
 ```bash
 cargo run --example launch_vanilla   # 也有 launch_fabric、launch_forge、launch_neoforge
-```
-
-## 磁碟結構
-
-啟動器根目錄（`base_dir`）內含共用的 `assets/`、`libraries/`，以及各實例的 `instance/{instance_name}/`。同一個 MC 版本可用不同 loader 建立不同實例（例如 `1.21.1-vanilla` 與 `1.21.1-fabric`）而不衝突。
-
-## 測試
-
-```bash
-cargo test
 ```

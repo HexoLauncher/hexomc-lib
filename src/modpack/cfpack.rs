@@ -105,13 +105,13 @@ impl CfManifest {
             }
         };
 
-        Ok(ModpackInfo {
+        ModpackInfo {
             name: self.name.clone(),
             version: self.version.clone(),
             mc_version: self.minecraft.version.clone(),
             loader,
             loader_version,
-        })
+        }.validated()
     }
 }
 
@@ -135,7 +135,24 @@ pub async fn install_cfpack(
 
     install_pack_loader(&info, instance_name, base_dir, java_path, progress.clone()).await?;
 
+    install_cfpack_files(pack_path, instance_name, base_dir, curseforge, progress).await
+}
+
+/// Extract overrides and download required files without installing Minecraft or its loader.
+/// No Java is required and `instance_config.json` is not created. Use the returned
+/// [`ModpackInfo`] to install Minecraft and the loader before the first launch.
+pub async fn install_cfpack_files(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    curseforge: &CurseForgeClient,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
+    let manifest = read_cf_manifest(pack_path).await?;
+    let info = manifest.info()?;
+
     let game_dir = instance_game_dir(base_dir, instance_name);
+    tokio::fs::create_dir_all(&game_dir).await?;
 
     progress(0, 0, "Extracting overrides");
     extract_zip_dir(pack_path, &manifest.overrides, &game_dir).await?;

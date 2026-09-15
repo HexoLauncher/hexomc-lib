@@ -46,13 +46,18 @@ pub use mods::modrinth::{ModrinthClient, MrProject, MrVersion};
 pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
 
 pub use modpack::{
-    detect_modpack_format, install_modpack,
+    detect_modpack_format, install_modpack, install_modpack_files, resolve_forge_version,
     ManualDownload, ModpackFormat, ModpackInfo, ModpackInstallResult,
 };
-pub use modpack::mrpack::{install_mrpack, read_mrpack_index, MrpackIndex};
-pub use modpack::cfpack::{install_cfpack, read_cf_manifest, CfManifest};
+pub use modpack::mrpack::{install_mrpack, install_mrpack_files, read_mrpack_index, MrpackIndex};
+pub use modpack::cfpack::{install_cfpack, install_cfpack_files, read_cf_manifest, CfManifest};
+pub use modpack::ftbpack::{
+    fetch_ftb_version_manifest, get_ftb_pack, install_ftb_pack, install_ftb_pack_files,
+    FtbCurseForgeRef, FtbFile, FtbPack, FtbTarget, FtbVersion, FtbVersionManifest,
+};
 pub use modpack::atpack::{
     fetch_atlauncher_pack_config, get_atlauncher_pack_versions, install_atlauncher_pack,
+    install_atlauncher_pack_files,
     AtPackConfig, AtPackVersion,
 };
 
