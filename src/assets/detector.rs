@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use crate::assets::nbt;
+
 
 #[derive(Debug, Clone)]
 pub struct ResourcePack {
@@ -29,13 +31,21 @@ pub fn detect_resource_packs(minecraft_dir: &Path) -> Vec<ResourcePack> {
     let dir = minecraft_dir.join("resourcepacks");
     scan_packs(&dir, is_resource_pack_zip, is_resource_pack_folder)
         .into_iter()
-        .map(|(name, path, is_folder)| ResourcePack { name, path, is_folder })
+        .map(|(name, path, is_folder)| ResourcePack {
+            name,
+            path,
+            is_folder,
+        })
         .collect()
 }
 
 fn is_resource_pack_zip(zip_path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(zip_path) else { return false; };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else { return false; };
+    let Ok(file) = std::fs::File::open(zip_path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
     let result = archive.by_name("pack.mcmeta").is_ok();
     result
 }
@@ -50,15 +60,24 @@ pub fn detect_shader_packs(minecraft_dir: &Path) -> Vec<ShaderPack> {
     let dir = minecraft_dir.join("shaderpacks");
     scan_packs(&dir, is_shader_zip, is_shader_folder)
         .into_iter()
-        .map(|(name, path, is_folder)| ShaderPack { name, path, is_folder })
+        .map(|(name, path, is_folder)| ShaderPack {
+            name,
+            path,
+            is_folder,
+        })
         .collect()
 }
 
 fn is_shader_zip(zip_path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(zip_path) else { return false; };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else { return false; };
+    let Ok(file) = std::fs::File::open(zip_path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
     let result = (0..archive.len()).any(|i| {
-        archive.by_index_raw(i)
+        archive
+            .by_index_raw(i)
             .map(|e| e.name().starts_with("shaders/"))
             .unwrap_or(false)
     });
@@ -87,18 +106,43 @@ pub fn detect_maps(minecraft_dir: &Path) -> Vec<WorldMap> {
             continue;
         }
 
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let icon_path = path.join("icon.png");
         let icon = std::fs::read(&icon_path).ok();
 
-        maps.push(WorldMap {
-            name,
-            path,
-            icon,
-        });
+        maps.push(WorldMap { name, path, icon });
     }
 
     maps
+}
+
+pub fn detect_servers(minecraft_dir: &Path) -> Vec<String> {
+    let servers_file = minecraft_dir.join("servers.dat");
+    if !servers_file.exists() {
+        return Vec::new();
+    }
+
+    let bytes = std::fs::read(&servers_file).unwrap_or_default();
+    let nbt = nbt::parse(&bytes);
+    let mut servers = Vec::new();
+
+    if let Some(nbt::Nbt::Compound(map)) = nbt {
+        if let Some(nbt::Nbt::List(list)) = map.get("servers") {
+            for item in list {
+                if let nbt::Nbt::Compound(server_map) = item {
+                    if let Some(nbt::Nbt::String(name)) = server_map.get("name") {
+                        servers.push(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    servers
 }
 
 #[cfg(test)]
@@ -251,7 +295,11 @@ fn scan_packs(
             }
         } else if path.is_dir() {
             if check_folder(&path) {
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 results.push((name, path, true));
             }
         }
