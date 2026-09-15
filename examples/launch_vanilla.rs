@@ -9,12 +9,12 @@ async fn main() -> Result<()> {
     let instance_name = "1.21.1-vanilla";
     let base_dir = PathBuf::from("./mc_data");
 
-    println!("=== 偵測 Java ===");
-    let java = find_java(21).expect("找不到 Java 21，請先安裝");
-    println!("Java: {} (版本 {})", java.path.display(), java.version);
+    println!("=== Detecting Java ===");
+    let java = find_java(21).expect("Java 21 not found, please install it first");
+    println!("Java: {} (version {})", java.path.display(), java.version);
 
     println!(
-        "\n=== 安裝 Minecraft {} (instance: {}) ===",
+        "\n=== Installing Minecraft {} (instance: {}) ===",
         mc_version, instance_name
     );
 
@@ -33,18 +33,18 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    println!("\n安裝完成！");
+    println!("\nInstallation complete!");
 
-    println!("\n=== 啟動 Minecraft {} (離線模式) ===", mc_version);
+    println!("\n=== Launching Minecraft {} (offline mode) ===", mc_version);
 
     let opts = LaunchOptions::offline(instance_name, java.path.clone(), "HexoPlayer");
 
     let mut child = launch(&opts, &base_dir).await?;
-    println!("MC 已啟動，PID: {:?}", child.id());
-    println!("等待遊戲關閉...");
+    println!("Minecraft started, PID: {:?}", child.id());
+    println!("Waiting for the game to exit...");
 
     let status = child.wait()?;
-    println!("MC 結束，退出碼: {}", status);
+    println!("Minecraft exited with: {}", status);
 
     Ok(())
 }

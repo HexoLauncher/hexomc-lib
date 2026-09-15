@@ -88,7 +88,7 @@ where
         .find(|v| v.id == version_id)
         .ok_or_else(|| HexoError::VersionNotFound(version_id.to_string()))?;
 
-    progress(0, 4, "取得版本資訊");
+    progress(0, 4, "fetching version info");
     let version_json = fetch_version_json(&entry.url).await?;
 
     let instance_dir = base_dir.join("instance").join(instance_name);
@@ -97,13 +97,13 @@ where
 
     init_instance_dirs(&instance_dir, &assets_dir, &lib_dir).await?;
 
-    progress(1, 4, "下載 libraries");
+    progress(1, 4, "downloading libraries");
     let (lib_list, natives) = download_libraries(&version_json, &lib_dir, progress.clone()).await?;
 
-    progress(2, 4, "下載 assets");
+    progress(2, 4, "downloading assets");
     download_assets(&version_json, &assets_dir, progress.clone()).await?;
 
-    progress(3, 4, "下載 client jar");
+    progress(3, 4, "downloading client jar");
     let client_jar = instance_dir.join(format!("{}.jar", version_id));
     download_file(
         &DownloadTask::new(
@@ -114,7 +114,7 @@ where
     )
     .await?;
 
-    progress(4, 4, "解析啟動參數");
+    progress(4, 4, "resolving launch arguments");
     let start_args = parse_start_args(&version_json);
 
     let config = InstanceConfig {
@@ -216,12 +216,12 @@ async fn download_libraries(
         native_tasks.iter().map(|(t, _)| t.clone()).collect();
 
     download_batch(lib_download_tasks, 16, move |done, _| {
-        p(done, total, "下載 libraries");
+        p(done, total, "downloading libraries");
     })
     .await?;
 
     download_batch(native_download_tasks, 8, move |done, _| {
-        progress(done, total, "下載 native libraries");
+        progress(done, total, "downloading native libraries");
     })
     .await?;
 
@@ -254,7 +254,7 @@ async fn download_assets(
 
     let total = tasks.len();
     download_batch(tasks, 32, move |done, _| {
-        progress(done, total, "下載 assets");
+        progress(done, total, "downloading assets");
     })
     .await
 }

@@ -408,7 +408,7 @@ async fn run_processors(
 
         if !status.success() {
             return Err(HexoError::ProcessorFailed(format!(
-                "processor {} 退出碼非零",
+                "processor {} exited with a non-zero status",
                 proc.jar
             )));
         }
@@ -504,7 +504,7 @@ fn resolve_maven_path_from_name(lib_dir: &Path, name: &str) -> Result<PathBuf> {
     let path = resolve_maven_path(lib_dir, name);
     if !path.exists() {
         return Err(HexoError::Other(format!(
-            "jar 不存在: {}",
+            "jar does not exist: {}",
             path.display()
         )));
     }
@@ -528,7 +528,7 @@ fn get_jar_main_class(jar_path: &Path) -> Result<String> {
         }
     }
     Err(HexoError::Other(format!(
-        "找不到 Main-Class in {}",
+        "no Main-Class found in {}",
         jar_path.display()
     )))
 }

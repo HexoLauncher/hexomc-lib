@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "需要網路"]
+    #[ignore = "requires network"]
     async fn fetch_manifest_returns_versions() {
         let manifest = fetch_version_manifest().await.unwrap();
         assert!(!manifest.versions.is_empty());
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "需要網路"]
+    #[ignore = "requires network"]
     async fn fetch_known_version_json() {
         let manifest = fetch_version_manifest().await.unwrap();
         let entry = manifest.versions.iter().find(|v| v.id == "1.21.4").unwrap();

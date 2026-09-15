@@ -119,12 +119,12 @@ pub async fn update_mod(update: &ModUpdate, mods_dir: &Path) -> Result<()> {
     let url = update
         .download_url()
         .ok_or_else(|| HexoError::DownloadFailed {
-            url: format!("模組 {} 無下載 URL", update.current.name),
+            url: format!("mod {} has no download URL", update.current.name),
         })?;
     let file_name = update
         .file_name()
         .ok_or_else(|| HexoError::DownloadFailed {
-            url: format!("模組 {} 無檔名", update.current.name),
+            url: format!("mod {} has no file name", update.current.name),
         })?;
 
     let new_path = mods_dir.join(file_name);

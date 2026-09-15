@@ -149,7 +149,7 @@ pub fn parse(bytes: &[u8]) -> Option<Nbt> {
     if tag != 10 {
         return None;
     }
-    reader.string()?; // 根節點的名稱，用不到
+    reader.string()?; // Root node name, unused
     reader.value(10)
 }
 
@@ -158,32 +158,32 @@ mod tests {
     use super::*;
 
     fn sample() -> Vec<u8> {
-        let mut out = vec![10, 0, 0]; // TAG_Compound，空名稱
+        let mut out = vec![10, 0, 0]; // TAG_Compound, empty name
         out.extend([9]); // TAG_List
         out.extend((b"servers".len() as i16).to_be_bytes());
         out.extend(b"servers");
-        out.extend([10]); // 元素型別 TAG_Compound
+        out.extend([10]); // Element type TAG_Compound
         out.extend(1i32.to_be_bytes());
 
-        for (key, value) in [("name", "家"), ("ip", "127.0.0.1")] {
+        for (key, value) in [("name", "Home"), ("ip", "127.0.0.1")] {
             out.extend([8]); // TAG_String
             out.extend((key.len() as i16).to_be_bytes());
             out.extend(key.as_bytes());
             out.extend((value.len() as i16).to_be_bytes());
             out.extend(value.as_bytes());
         }
-        out.extend([0]); // 元素結束
-        out.extend([0]); // 根節點結束
+        out.extend([0]); // End of element
+        out.extend([0]); // End of root node
         out
     }
 
     #[test]
     fn reads_server_entries() {
-        let root = parse(&sample()).expect("應該解析得出來");
+        let root = parse(&sample()).expect("should parse");
         let servers = root.get("servers").and_then(Nbt::as_list).expect("servers");
 
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].get("name").and_then(Nbt::as_str), Some("家"));
+        assert_eq!(servers[0].get("name").and_then(Nbt::as_str), Some("Home"));
         assert_eq!(
             servers[0].get("ip").and_then(Nbt::as_str),
             Some("127.0.0.1")

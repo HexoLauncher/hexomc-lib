@@ -9,24 +9,24 @@ async fn main() -> Result<()> {
 
     let instance_name = "1.7.10-forge";
 
-    println!("=== 偵測 Java ===");
-    let java = find_java(8).expect("找不到 Java，請先安裝 Java 8");
-    println!("Java: {} (版本 {})", java.path.display(), java.version);
+    println!("=== Detecting Java ===");
+    let java = find_java(8).expect("Java not found, please install Java 8 first");
+    println!("Java: {} (version {})", java.path.display(), java.version);
     if java.version != 8 {
         panic!(
-            "Forge 1.7.10 需要 Java 8，但偵測到 Java {}。請安裝 Java 8 後再試。",
+            "Forge 1.7.10 needs Java 8, but Java {} was detected. Install Java 8 and try again.",
             java.version
         );
     }
 
-    println!("\n=== 查詢 Forge 版本 ===");
+    println!("\n=== Querying Forge versions ===");
     let forge_versions = get_forge_versions(mc_version).await?;
     if let Some(recommended) = forge_versions.first() {
-        println!("Forge 推薦版本: {}", recommended);
+        println!("Recommended Forge version: {}", recommended);
     }
-    println!("共 {} 個版本可用", forge_versions.len());
+    println!("{} versions available", forge_versions.len());
 
-    println!("\n=== 安裝 Minecraft {} + Forge ===", mc_version);
+    println!("\n=== Installing Minecraft {} + Forge ===", mc_version);
 
     let progress: ProgressFn = Arc::new(|done, total, desc| {
         if total > 0 {
@@ -38,18 +38,18 @@ async fn main() -> Result<()> {
 
     install_with_loader(mc_version, instance_name, &base_dir, &loader, progress).await?;
 
-    println!("\n安裝完成！");
+    println!("\nInstallation complete!");
 
-    println!("\n=== 啟動 Minecraft {} + Forge (離線模式) ===", mc_version);
+    println!("\n=== Launching Minecraft {} + Forge (offline mode) ===", mc_version);
 
     let opts = LaunchOptions::offline(instance_name, java.path.clone(), "HexoPlayer");
 
     let mut child = launch(&opts, &base_dir).await?;
-    println!("MC 已啟動，PID: {:?}", child.id());
-    println!("等待遊戲關閉...");
+    println!("Minecraft started, PID: {:?}", child.id());
+    println!("Waiting for the game to exit...");
 
     let status = child.wait()?;
-    println!("MC 結束，退出碼: {}", status);
+    println!("Minecraft exited with: {}", status);
 
     Ok(())
 }

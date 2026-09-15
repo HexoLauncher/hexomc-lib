@@ -74,7 +74,7 @@ pub async fn poll_device_code(device_resp: &MsDeviceCodeResponse) -> Result<Auth
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         if now > deadline {
-            return Err(HexoError::AuthError("裝置代碼已過期".to_string()));
+            return Err(HexoError::AuthError("device code expired".to_string()));
         }
 
         let token_resp: serde_json::Value = client
@@ -97,14 +97,14 @@ pub async fn poll_device_code(device_resp: &MsDeviceCodeResponse) -> Result<Auth
                     continue;
                 }
                 other => {
-                    return Err(HexoError::AuthError(format!("MS token 錯誤: {}", other)));
+                    return Err(HexoError::AuthError(format!("Microsoft token error: {}", other)));
                 }
             }
         }
 
         let ms_access_token = token_resp["access_token"]
             .as_str()
-            .ok_or_else(|| HexoError::AuthError("缺少 MS access_token".into()))?
+            .ok_or_else(|| HexoError::AuthError("missing Microsoft access_token".into()))?
             .to_string();
 
         let refresh_token = token_resp["refresh_token"]
@@ -137,14 +137,14 @@ pub async fn refresh_token(refresh_token: &str) -> Result<AuthResult> {
 
     if let Some(err) = token_resp.get("error") {
         return Err(HexoError::AuthError(format!(
-            "refresh token 失敗: {}",
+            "refresh token failed: {}",
             err.as_str().unwrap_or("unknown")
         )));
     }
 
     let ms_access_token = token_resp["access_token"]
         .as_str()
-        .ok_or_else(|| HexoError::AuthError("缺少 access_token".into()))?
+        .ok_or_else(|| HexoError::AuthError("missing access_token".into()))?
         .to_string();
 
     let new_refresh = token_resp["refresh_token"]
@@ -184,12 +184,12 @@ async fn complete_auth(
 
     let xbl_token = xbl_resp["Token"]
         .as_str()
-        .ok_or_else(|| HexoError::AuthError("XBL token 失敗".into()))?
+        .ok_or_else(|| HexoError::AuthError("Xbox Live token request failed".into()))?
         .to_string();
 
     let user_hash = xbl_resp["DisplayClaims"]["xui"][0]["uhs"]
         .as_str()
-        .ok_or_else(|| HexoError::AuthError("XBL uhs 失敗".into()))?
+        .ok_or_else(|| HexoError::AuthError("Xbox Live uhs missing".into()))?
         .to_string();
 
     // XSTS
@@ -209,12 +209,12 @@ async fn complete_auth(
         .await?;
 
     if let Some(xerr) = xsts_resp.get("XErr") {
-        return Err(HexoError::AuthError(format!("XSTS 錯誤: {}", xerr)));
+        return Err(HexoError::AuthError(format!("XSTS error: {}", xerr)));
     }
 
     let xsts_token = xsts_resp["Token"]
         .as_str()
-        .ok_or_else(|| HexoError::AuthError("XSTS token 失敗".into()))?
+        .ok_or_else(|| HexoError::AuthError("XSTS token request failed".into()))?
         .to_string();
 
     let xuid = xsts_resp["DisplayClaims"]["xui"][0]["xid"]
@@ -235,7 +235,7 @@ async fn complete_auth(
 
     let mc_token = mc_resp["access_token"]
         .as_str()
-        .ok_or_else(|| HexoError::AuthError("MC token 失敗".into()))?
+        .ok_or_else(|| HexoError::AuthError("Minecraft token request failed".into()))?
         .to_string();
 
     // MC Profile
@@ -248,17 +248,17 @@ async fn complete_auth(
         .await?;
 
     if profile_resp.get("error").is_some() {
-        return Err(HexoError::AuthError("帳號未購買 Minecraft".to_string()));
+        return Err(HexoError::AuthError("account does not own Minecraft".to_string()));
     }
 
     let player_name = profile_resp["name"]
         .as_str()
-        .ok_or_else(|| HexoError::AuthError("無法取得玩家名稱".into()))?
+        .ok_or_else(|| HexoError::AuthError("could not read the player name".into()))?
         .to_string();
 
     let uuid = profile_resp["id"]
         .as_str()
-        .ok_or_else(|| HexoError::AuthError("無法取得 UUID".into()))?
+        .ok_or_else(|| HexoError::AuthError("could not read the UUID".into()))?
         .to_string();
 
     Ok(AuthResult {

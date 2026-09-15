@@ -5,6 +5,7 @@ pub mod error;
 pub mod install;
 pub mod java;
 pub mod launch;
+pub mod modpack;
 pub mod mods;
 pub mod version;
 
@@ -43,6 +44,17 @@ pub use mods::detector::{detect_mods, ModInfo, ModLoader};
 pub use mods::curseforge::CurseForgeClient;
 pub use mods::modrinth::{ModrinthClient, MrProject, MrVersion};
 pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
+
+pub use modpack::{
+    detect_modpack_format, install_modpack,
+    ManualDownload, ModpackFormat, ModpackInfo, ModpackInstallResult,
+};
+pub use modpack::mrpack::{install_mrpack, read_mrpack_index, MrpackIndex};
+pub use modpack::cfpack::{install_cfpack, read_cf_manifest, CfManifest};
+pub use modpack::atpack::{
+    fetch_atlauncher_pack_config, get_atlauncher_pack_versions, install_atlauncher_pack,
+    AtPackConfig, AtPackVersion,
+};
 
 pub use assets::detector::{
     detect_resource_packs, detect_shader_packs, detect_maps,

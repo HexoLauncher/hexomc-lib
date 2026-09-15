@@ -9,18 +9,18 @@ async fn main() -> Result<()> {
 
     let instance_name = "1.21.1-neoforge";
 
-    println!("=== 偵測 Java ===");
-    let java = find_java(21).expect("找不到 Java 21，請先安裝");
-    println!("Java: {} (版本 {})", java.path.display(), java.version);
+    println!("=== Detecting Java ===");
+    let java = find_java(21).expect("Java 21 not found, please install it first");
+    println!("Java: {} (version {})", java.path.display(), java.version);
 
-    println!("\n=== 查詢 NeoForge 版本 ===");
+    println!("\n=== Querying NeoForge versions ===");
     let neoforge_versions = get_neoforge_versions(mc_version).await?;
     if let Some(latest) = neoforge_versions.last() {
-        println!("最新 NeoForge 版本: {}", latest);
+        println!("Latest NeoForge version: {}", latest);
     }
-    println!("共 {} 個版本可用", neoforge_versions.len());
+    println!("{} versions available", neoforge_versions.len());
 
-    println!("\n=== 安裝 Minecraft {} + NeoForge ===", mc_version);
+    println!("\n=== Installing Minecraft {} + NeoForge ===", mc_version);
 
     let progress: ProgressFn = Arc::new(|done, total, desc| {
         if total > 0 {
@@ -32,21 +32,21 @@ async fn main() -> Result<()> {
 
     install_with_loader(mc_version, instance_name, &base_dir, &loader, progress).await?;
 
-    println!("\n安裝完成！");
+    println!("\nInstallation complete!");
 
     println!(
-        "\n=== 啟動 Minecraft {} + NeoForge (離線模式) ===",
+        "\n=== Launching Minecraft {} + NeoForge (offline mode) ===",
         mc_version
     );
 
     let opts = LaunchOptions::offline(instance_name, java.path.clone(), "HexoPlayer");
 
     let mut child = launch(&opts, &base_dir).await?;
-    println!("MC 已啟動，PID: {:?}", child.id());
-    println!("等待遊戲關閉...");
+    println!("Minecraft started, PID: {:?}", child.id());
+    println!("Waiting for the game to exit...");
 
     let status = child.wait()?;
-    println!("MC 結束，退出碼: {}", status);
+    println!("Minecraft exited with: {}", status);
 
     Ok(())
 }

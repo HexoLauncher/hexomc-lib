@@ -34,11 +34,24 @@ pub struct CfMod {
     pub summary: String,
     #[serde(rename = "downloadCount")]
     pub download_count: u64,
+    /// Project category: 6 = mods, 12 = resource packs, 6552 = shaders.
+    #[serde(rename = "classId", default)]
+    pub class_id: Option<u32>,
+    #[serde(default)]
+    pub links: Option<CfLinks>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CfLinks {
+    #[serde(rename = "websiteUrl", default)]
+    pub website_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CfModFile {
     pub id: u64,
+    #[serde(rename = "modId", default)]
+    pub mod_id: u64,
     #[serde(rename = "displayName")]
     pub display_name: String,
     #[serde(rename = "fileName")]
@@ -120,6 +133,58 @@ impl CurseForgeClient {
             .headers(self.headers())
             .send()
             .await?
+            .json()
+            .await?;
+
+        Ok(resp.data)
+    }
+
+    /// Look up several files at once by file ID.
+    pub async fn get_files(&self, file_ids: &[u64]) -> Result<Vec<CfModFile>> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            #[serde(rename = "fileIds")]
+            file_ids: &'a [u64],
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            data: Vec<CfModFile>,
+        }
+
+        let resp: Resp = self
+            .client
+            .post(format!("{}/mods/files", CF_BASE))
+            .headers(self.headers())
+            .json(&Body { file_ids })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(resp.data)
+    }
+
+    /// Look up several mods at once by project ID.
+    pub async fn get_mods(&self, mod_ids: &[u64]) -> Result<Vec<CfMod>> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            #[serde(rename = "modIds")]
+            mod_ids: &'a [u64],
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            data: Vec<CfMod>,
+        }
+
+        let resp: Resp = self
+            .client
+            .post(format!("{}/mods", CF_BASE))
+            .headers(self.headers())
+            .json(&Body { mod_ids })
+            .send()
+            .await?
+            .error_for_status()?
             .json()
             .await?;
 
