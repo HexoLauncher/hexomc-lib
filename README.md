@@ -18,6 +18,13 @@ hexomc-lib = "0.1"
 
 ## 快速開始
 
+### Java 快取與下載進度
+
+`download_java(version, base_dir)` 會先重用 `java/{version}/jre` 裡已解壓的 Java，避免重複查詢、下載和解壓。
+需要進度時，改用 `download_java_with_progress(version, base_dir, progress)`，其中 `progress` 是 `ProgressFn`。
+在 `Downloading Java` 階段，兩個數值是「已下載 bytes、總 bytes」，可換算成 MB 或百分比；總大小為 `0` 表示未知，重試時已下載量會歸零。
+其他階段以 `(0, 0, 階段文字)` 通知。下載進度到 100% 後仍需等待校驗、解壓及函式成功回傳。
+
 安裝並以離線模式啟動 Minecraft：
 
 ```rust

@@ -28,7 +28,7 @@ Integration tests (`tests/integration.rs`) are **not** `#[ignore]`d: they hit li
 The public surface is re-exported flat from [src/lib.rs](src/lib.rs) — check it first to see what's stable API vs. internal. Modules:
 
 - **`version`** — fetches and parses Mojang's version manifest and per-version JSON, including library/JVM rule evaluation (`check_library_rule`, `check_jvm_rule`).
-- **`download`** — [src/download/downloader.rs](src/download/downloader.rs) is the shared download engine: `DownloadTask` (with optional SHA1), `download_file` (retries, skips if SHA1 already matches), and `download_batch` (concurrent via `futures::stream`). All installers route through this.
+- **`download`** — [src/download/downloader.rs](src/download/downloader.rs) is the shared download engine: `DownloadTask` (with optional SHA1 and SHA-256), `download_file` (retries, skips if all configured checksums match), and `download_batch` (concurrent via `futures::stream`). All installers route through this.
 - **`install`** — one module per loader (`vanilla`, `fabric`, `forge`, `neoforge`) plus `loader.rs`, the DI layer.
 - **`launch`** — assembles classpath, extracts natives, substitutes `${placeholder}` args, writes a Java `@argfile`, and spawns the process.
 - **`modpack`** — modpack installers built on top of `install` (see below).
@@ -50,12 +50,14 @@ Use `install_modpack_files`, `install_mrpack_files`, `install_cfpack_files`, `in
 
 - **`mrpack`** — Modrinth `.mrpack` (`modrinth.index.json`, `overrides/` then `client-overrides/`; files with client env `unsupported` are skipped).
 - **`cfpack`** — CurseForge zip (`manifest.json` + overrides). Download URLs come from `CurseForgeClient::get_files`/`get_mods` (API key required); `classId` picks `mods`/`resourcepacks`/`shaderpacks`. Files with a null `downloadUrl` are returned as `ManualDownload`, never fetched via a CDN workaround.
-- **`atpack`** — ATLauncher packs have no file format: `Configs.json` / `Configs.zip` are fetched from `download.nodecdn.net/containers/atl/packs/{safeName}/versions/{version}/`, the version list from `api.atlauncher.com/v1/pack/{safeName}`. That API is behind Cloudflare and returns 403 without a User-Agent. Files carry MD5 (checked after download, since `DownloadTask` only verifies SHA1).
+- **`atpack`** — ATLauncher packs have no file format: `Configs.json` / `Configs.zip` are fetched from `download.nodecdn.net/containers/atl/packs/{safeName}/versions/{version}/`, the version list from `api.atlauncher.com/v1/pack/{safeName}`. That API is behind Cloudflare and returns 403 without a User-Agent. Files carry MD5 (checked after download, since `DownloadTask` verifies SHA1 and SHA-256, not MD5).
 - **`ftbpack`** — FTB packs have no file format: metadata and version manifests come from `api.feed-the-beast.com/v1/modpacks/public/modpack/{packId}[/{versionId}]`. Installs client files at manifest paths, optionally including optional files. CurseForge references accept numeric or string IDs and are resolved through the supplied client; missing URLs or a missing client yield manual downloads. Entries without any download source are skipped. Pack names come from pack metadata, not the version manifest.
 
 `install_pack_loader` reuses `install_with_loader`; for Forge/NeoForge it installs vanilla first so a `None` `java_path` can be resolved with `find_java(InstanceConfig.java_version)`. Modpacks give bare Forge versions (`47.2.0`), which are mapped to the MC-prefixed strings from `get_forge_versions`. Quilt, LegacyFabric and NeoForge 1.20.1 (old `forge` artifact) return `UnsupportedLoader`. Every pack-provided path goes through `safe_join` / zip `enclosed_name` so a pack can't write outside the instance. Results report `manual_downloads` and `skipped` (unsupported ATLauncher entry types or FTB entries without download sources) instead of failing.
 
 ### On-disk layout
+
+`download_java` first reuses an existing executable under `java/{version}/jre`, before network access. `download_java_with_progress` accepts `ProgressFn`: the `Downloading Java` stage reports bytes (total zero means unknown; retries reset the count), while metadata, reuse, extraction, and completion stages report `(0, 0)`. The shared `download_file_with_progress` reports per-file bytes and retains checksum verification and retries; batch progress still counts files. Adoptium's package size is used when the download response omits its length.
 
 A launcher root (`base_dir`, e.g. `./mc_data`) contains shared `assets/` and `libraries/`, plus per-instance `instance/{instance_name}/`. Each instance dir holds `instance_config.json` (the serialized `InstanceConfig`: main class, `start_args` with placeholders, library/native lists, `assets_id`, `java_version`) and a `natives/` dir. `InstanceConfig::save`/`load` is the contract between the install and launch phases — launch reads this file, never the loader APIs.
 

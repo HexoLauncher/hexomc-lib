@@ -16,7 +16,7 @@ pub use version::manifest::{
     VersionEntry, VersionManifest, VersionJson,
 };
 
-pub use download::{download_file, download_batch, DownloadTask};
+pub use download::{download_file, download_file_with_progress, download_batch, DownloadTask};
 
 pub use install::vanilla::{install_vanilla, InstanceConfig, LoaderType, LibEntry, NativeEntry};
 pub use install::fabric::{install_fabric, get_fabric_loader_versions};
@@ -30,7 +30,7 @@ pub use install::loader::{
 };
 
 pub use java::detector::{find_java, JavaInfo};
-pub use java::installer::download_java;
+pub use java::installer::{download_java, download_java_with_progress};
 
 pub use launch::launcher::{launch, launch_with_channel, launch_with_output, LaunchOptions};
 pub use launch::output::{no_output, GameProcess, OutputFn, OutputKind, OutputLine};
