@@ -12,7 +12,12 @@ pub mod cfpack;
 pub mod ftbpack;
 pub mod mrpack;
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::{Component, Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{HexoError, Result},
@@ -85,6 +90,21 @@ pub struct ModpackInstallResult {
     pub skipped: Vec<String>,
 }
 
+/// Result of changing an installed local modpack to another version.
+#[derive(Debug, Clone)]
+pub struct ModpackUpdateResult {
+    pub install: ModpackInstallResult,
+    /// Files managed by the previous pack version and removed by this update.
+    pub removed_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ModpackState {
+    managed_files: BTreeSet<String>,
+}
+
+const MODPACK_STATE_FILE: &str = "modpack_state.json";
+
 /// Detect a modpack's format from the zip contents.
 pub async fn detect_modpack_format(pack_path: &Path) -> Result<ModpackFormat> {
     let pack_path = pack_path.to_path_buf();
@@ -118,6 +138,28 @@ pub async fn install_modpack(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    let result = install_modpack_inner(
+        pack_path,
+        instance_name,
+        base_dir,
+        java_path,
+        curseforge,
+        progress,
+    )
+    .await?;
+    save_modpack_state(instance_name, base_dir, managed_files).await?;
+    Ok(result)
+}
+
+async fn install_modpack_inner(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    java_path: Option<&Path>,
+    curseforge: Option<&CurseForgeClient>,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
     match detect_modpack_format(pack_path).await? {
         ModpackFormat::Modrinth => {
             mrpack::install_mrpack(pack_path, instance_name, base_dir, java_path, progress).await
@@ -131,6 +173,47 @@ pub async fn install_modpack(
     }
 }
 
+/// Install or change a local Modrinth/CurseForge modpack version in-place.
+///
+/// Minecraft and its loader are reinstalled when the new pack requests different
+/// versions. Files recorded from an earlier call are removed when the new manifest
+/// no longer contains them. Files added by the user are never included in that state.
+pub async fn update_modpack(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    java_path: Option<&Path>,
+    curseforge: Option<&CurseForgeClient>,
+    progress: ProgressFn,
+) -> Result<ModpackUpdateResult> {
+    let previous = load_modpack_state(instance_name, base_dir).await?;
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    let install = install_modpack_inner(
+        pack_path,
+        instance_name,
+        base_dir,
+        java_path,
+        curseforge,
+        progress,
+    )
+    .await?;
+    let current = ModpackState { managed_files };
+    let game_dir = instance_game_dir(base_dir, instance_name);
+    let removed_files = remove_obsolete_managed_files(
+        &game_dir,
+        previous.as_ref().map(|state| &state.managed_files),
+        &current.managed_files,
+    )
+    .await?;
+
+    save_modpack_state(instance_name, base_dir, current.managed_files).await?;
+
+    Ok(ModpackUpdateResult {
+        install,
+        removed_files,
+    })
+}
+
 /// Extract overrides and download pack files, detecting the local pack format.
 /// Minecraft and the mod loader are not installed; install them later with
 /// [`install_with_loader`] using the returned [`ModpackInfo`]. No Java is required.
@@ -142,7 +225,7 @@ pub async fn install_modpack_files(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
-    match detect_modpack_format(pack_path).await? {
+    let result = match detect_modpack_format(pack_path).await? {
         ModpackFormat::Modrinth => {
             mrpack::install_mrpack_files(pack_path, instance_name, base_dir, progress).await
         }
@@ -152,7 +235,127 @@ pub async fn install_modpack_files(
             })?;
             cfpack::install_cfpack_files(pack_path, instance_name, base_dir, cf, progress).await
         }
+    }?;
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    save_modpack_state(instance_name, base_dir, managed_files).await?;
+    Ok(result)
+}
+
+async fn managed_files_for_local(
+    pack_path: &Path,
+    curseforge: Option<&CurseForgeClient>,
+) -> Result<BTreeSet<String>> {
+    match detect_modpack_format(pack_path).await? {
+        ModpackFormat::Modrinth => {
+            let index = mrpack::read_mrpack_index(pack_path).await?;
+            index
+                .files
+                .iter()
+                .filter(|file| file.is_client_supported())
+                .map(|file| normalize_managed_path(&file.path))
+                .collect::<Result<_>>()
+        }
+        ModpackFormat::CurseForge => {
+            let client = curseforge.ok_or_else(|| {
+                HexoError::Other("updating a CurseForge modpack requires a CurseForgeClient".into())
+            })?;
+            let manifest = cfpack::read_cf_manifest(pack_path).await?;
+            let wanted: Vec<_> = manifest.files.iter().filter(|file| file.required).collect();
+            if wanted.is_empty() {
+                return Ok(BTreeSet::new());
+            }
+            let file_ids: Vec<_> = wanted.iter().map(|file| file.file_id).collect();
+            let project_ids: Vec<_> = wanted.iter().map(|file| file.project_id).collect();
+            let projects: HashMap<_, _> = client
+                .get_mods(&project_ids)
+                .await?
+                .into_iter()
+                .map(|project| (project.id, project))
+                .collect();
+            client
+                .get_files(&file_ids)
+                .await?
+                .into_iter()
+                .map(|file| {
+                    let directory = match projects.get(&file.mod_id).and_then(|p| p.class_id) {
+                        Some(12) => "resourcepacks",
+                        Some(6552) => "shaderpacks",
+                        _ => "mods",
+                    };
+                    normalize_managed_path(&format!("{directory}/{}", file.file_name))
+                })
+                .collect::<Result<_>>()
+        }
     }
+}
+
+async fn save_modpack_state(
+    instance_name: &str,
+    base_dir: &Path,
+    managed_files: BTreeSet<String>,
+) -> Result<()> {
+    let state = ModpackState { managed_files };
+    let state_path = modpack_state_path(instance_name, base_dir);
+    if let Some(parent) = state_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(state_path, serde_json::to_vec_pretty(&state)?).await?;
+    Ok(())
+}
+
+async fn load_modpack_state(
+    instance_name: &str,
+    base_dir: &Path,
+) -> Result<Option<ModpackState>> {
+    let path = modpack_state_path(instance_name, base_dir);
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn modpack_state_path(instance_name: &str, base_dir: &Path) -> PathBuf {
+    base_dir
+        .join("instance")
+        .join(instance_name)
+        .join(MODPACK_STATE_FILE)
+}
+
+fn normalize_managed_path(path: &str) -> Result<String> {
+    let path = path.replace('\\', "/");
+    if path.is_empty() {
+        return Err(HexoError::Other("empty path in modpack manifest".into()));
+    }
+    let root = Path::new(".");
+    let safe = safe_join(root, &path)?;
+    Ok(safe
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+async fn remove_obsolete_managed_files(
+    game_dir: &Path,
+    previous: Option<&BTreeSet<String>>,
+    current: &BTreeSet<String>,
+) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    let Some(previous) = previous else {
+        return Ok(removed);
+    };
+    for relative in previous.difference(current) {
+        let path = safe_join(game_dir, relative)?;
+        if path.is_file() {
+            tokio::fs::remove_file(&path).await?;
+            removed.push(path);
+        }
+    }
+    Ok(removed)
 }
 
 pub(crate) fn instance_game_dir(base_dir: &Path, instance_name: &str) -> PathBuf {
@@ -382,6 +585,40 @@ mod tests {
         assert!(safe_join(root, "../evil.jar").is_err());
         assert!(safe_join(root, "mods/../../evil.jar").is_err());
         assert!(safe_join(root, "/etc/passwd").is_err());
+    }
+
+    #[tokio::test]
+    async fn modpack_update_removes_only_obsolete_managed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = temp.path();
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/old.jar"), b"old").unwrap();
+        std::fs::write(game.join("mods/kept.jar"), b"kept").unwrap();
+        std::fs::write(game.join("mods/user.jar"), b"user").unwrap();
+
+        let previous = BTreeSet::from([
+            "mods/old.jar".to_string(),
+            "mods/kept.jar".to_string(),
+        ]);
+        let current = BTreeSet::from(["mods/kept.jar".to_string()]);
+        let removed = remove_obsolete_managed_files(game, Some(&previous), &current)
+            .await
+            .unwrap();
+
+        assert_eq!(removed, vec![game.join("mods/old.jar")]);
+        assert!(!game.join("mods/old.jar").exists());
+        assert!(game.join("mods/kept.jar").exists());
+        assert!(game.join("mods/user.jar").exists());
+    }
+
+    #[test]
+    fn managed_paths_are_normalized_and_cannot_escape() {
+        assert_eq!(
+            normalize_managed_path("mods\\example.jar").unwrap(),
+            "mods/example.jar"
+        );
+        assert!(normalize_managed_path("../outside.jar").is_err());
+        assert!(normalize_managed_path("").is_err());
     }
 
     #[tokio::test]

@@ -21,11 +21,10 @@ pub fn find_java(required_version: u32) -> Option<JavaInfo> {
     let mut best: Option<JavaInfo> = None;
     for path in &candidates {
         if let Some(info) = probe_java(path) {
-            if info.version >= required_version {
-                if best.as_ref().map_or(true, |b| info.version < b.version) {
+            if info.version >= required_version
+                && best.as_ref().is_none_or(|b| info.version < b.version) {
                     best = Some(info);
                 }
-            }
         }
     }
     best

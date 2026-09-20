@@ -165,7 +165,7 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
     extract_natives(&config, &natives_dir)?;
 
     let classpath = build_classpath(&config, &instance_dir);
-    let argdata = build_argdata(&options, base_dir, &instance_dir, &config, &classpath);
+    let argdata = build_argdata(options, base_dir, &instance_dir, &config, &classpath);
 
     let mut final_args: Vec<String> = Vec::new();
     final_args.extend(options.jvm_extra_args.iter().cloned());

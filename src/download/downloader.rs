@@ -69,6 +69,9 @@ pub async fn verify_sha256(path: &Path, expected: &str) -> bool {
 
 /// Check every checksum supplied by the caller.
 async fn verify_task(task: &DownloadTask) -> bool {
+    if task.sha1.is_none() && task.sha256.is_none() {
+        return false;
+    }
     if let Some(expected) = &task.sha1 {
         if !verify_sha1(&task.path, expected).await {
             return false;
@@ -105,15 +108,23 @@ where
     }
 
     let client = reqwest::Client::new();
+    let temp_path = temporary_sibling(&task.path, "download");
     let mut last_err = None;
 
     for _ in 0..MAX_RETRIES {
-        match try_download(&client, &task.url, &task.path, &progress).await {
+        match try_download(&client, &task.url, &temp_path, &progress).await {
             Ok(()) => {
-                if !verify_task(task).await {
+                let mut temp_task = task.clone();
+                temp_task.path = temp_path.clone();
+                if !verify_task(&temp_task).await && (task.sha1.is_some() || task.sha256.is_some())
+                {
                     last_err = Some(HexoError::ChecksumMismatch {
                         path: task.path.display().to_string(),
                     });
+                    continue;
+                }
+                if let Err(error) = replace_file(&temp_path, &task.path).await {
+                    last_err = Some(error);
                     continue;
                 }
                 return Ok(());
@@ -124,9 +135,35 @@ where
         }
     }
 
+    let _ = fs::remove_file(&temp_path).await;
+
     Err(last_err.unwrap_or(HexoError::DownloadFailed {
         url: task.url.clone(),
     }))
+}
+
+fn temporary_sibling(path: &Path, kind: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    path.with_file_name(format!(".{name}.{kind}-{}", uuid::Uuid::new_v4()))
+}
+
+async fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    if !destination.exists() {
+        fs::rename(source, destination).await?;
+        return Ok(());
+    }
+
+    let backup = temporary_sibling(destination, "backup");
+    fs::rename(destination, &backup).await?;
+    if let Err(error) = fs::rename(source, destination).await {
+        let _ = fs::rename(&backup, destination).await;
+        return Err(error.into());
+    }
+    fs::remove_file(backup).await?;
+    Ok(())
 }
 
 async fn try_download<F>(
@@ -374,5 +411,16 @@ mod tests {
         let task = DownloadTask::new("http://127.0.0.1:0/nonexistent", f.path()).with_sha1(sha1);
 
         assert!(download_file(&task).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn download_without_checksum_replaces_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("archive");
+        fs::write(&path, b"old").await.unwrap();
+        let (url, server) = serve(vec![(200, "new")]).await;
+        download_file(&DownloadTask::new(url, &path)).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(fs::read(path).await.unwrap(), b"new");
     }
 }

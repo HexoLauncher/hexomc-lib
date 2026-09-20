@@ -92,11 +92,7 @@ fn loader_type_id(loader: &ModLoader) -> u32 {
 
 impl CurseForgeClient {
     /// Search for mods.
-    pub async fn search_mod(
-        &self,
-        name: &str,
-        loader: &ModLoader,
-    ) -> Result<Vec<CfMod>> {
+    pub async fn search_mod(&self, name: &str, loader: &ModLoader) -> Result<Vec<CfMod>> {
         #[derive(Deserialize)]
         struct Resp {
             data: Vec<CfMod>,
@@ -114,6 +110,7 @@ impl CurseForgeClient {
             ])
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
 
@@ -133,6 +130,7 @@ impl CurseForgeClient {
             .headers(self.headers())
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
 

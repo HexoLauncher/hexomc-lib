@@ -283,8 +283,8 @@ fn scan_packs(
         let path = entry.path();
 
         if path.is_file() {
-            if path.extension().and_then(|e| e.to_str()) == Some("zip") {
-                if check_zip(&path) {
+            if path.extension().and_then(|e| e.to_str()) == Some("zip")
+                && check_zip(&path) {
                     let name = path
                         .file_stem()
                         .unwrap_or_default()
@@ -292,9 +292,8 @@ fn scan_packs(
                         .to_string();
                     results.push((name, path, false));
                 }
-            }
-        } else if path.is_dir() {
-            if check_folder(&path) {
+        } else if path.is_dir()
+            && check_folder(&path) {
                 let name = path
                     .file_name()
                     .unwrap_or_default()
@@ -302,7 +301,6 @@ fn scan_packs(
                     .to_string();
                 results.push((name, path, true));
             }
-        }
     }
 
     results

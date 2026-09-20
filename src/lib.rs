@@ -36,8 +36,7 @@ pub use launch::launcher::{launch, launch_with_channel, launch_with_output, Laun
 pub use launch::output::{no_output, GameProcess, OutputFn, OutputKind, OutputLine};
 
 pub use auth::microsoft::{
-    request_device_code, poll_device_code, refresh_token,
-    AuthResult, DeviceCodeInfo,
+    AuthResult, DeviceCodeInfo, MicrosoftAuth, MsDeviceCodeResponse,
 };
 
 pub use mods::detector::{detect_mods, ModInfo, ModLoader};
@@ -47,7 +46,8 @@ pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
 
 pub use modpack::{
     detect_modpack_format, install_modpack, install_modpack_files, resolve_forge_version,
-    ManualDownload, ModpackFormat, ModpackInfo, ModpackInstallResult,
+    update_modpack, ManualDownload, ModpackFormat, ModpackInfo, ModpackInstallResult,
+    ModpackUpdateResult,
 };
 pub use modpack::mrpack::{install_mrpack, install_mrpack_files, read_mrpack_index, MrpackIndex};
 pub use modpack::cfpack::{install_cfpack, install_cfpack_files, read_cf_manifest, CfManifest};

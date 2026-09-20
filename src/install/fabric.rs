@@ -100,7 +100,7 @@ pub async fn install_fabric(
     if let Some(jvm_args) = &profile.arguments.jvm {
         let trimmed: Vec<String> = jvm_args.iter().map(|s| s.trim().to_string()).collect();
         let mut new_args = trimmed;
-        new_args.extend(config.start_args.drain(..));
+        new_args.append(&mut config.start_args);
         config.start_args = new_args;
     }
 
@@ -112,7 +112,7 @@ pub async fn install_fabric(
     config.loader_type = crate::install::vanilla::LoaderType::Fabric;
 
     // Prepend the new libs so Fabric takes precedence.
-    new_libs.extend(config.lib_list.drain(..));
+    new_libs.append(&mut config.lib_list);
     config.lib_list = new_libs;
 
     config.save(&instance_dir).await?;
