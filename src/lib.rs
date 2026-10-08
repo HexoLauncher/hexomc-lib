@@ -39,6 +39,7 @@ pub use auth::microsoft::{
     request_device_code, poll_device_code, refresh_token,
     AuthResult, DeviceCodeInfo,
 };
+pub use auth::session::join_server;
 
 pub use mods::detector::{detect_mods, ModInfo, ModLoader};
 pub use mods::curseforge::CurseForgeClient;
