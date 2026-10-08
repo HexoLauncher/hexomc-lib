@@ -40,7 +40,9 @@ pub use auth::microsoft::{
 };
 pub use auth::session::join_server;
 
-pub use mods::detector::{detect_mods, ModInfo, ModLoader};
+pub use mods::detector::{
+    detect_mods, read_mod_icon, read_mod_info, DependencyKind, ModDependency, ModInfo, ModLoader,
+};
 pub use mods::curseforge::CurseForgeClient;
 pub use mods::modrinth::{ModrinthClient, MrProject, MrVersion};
 pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
