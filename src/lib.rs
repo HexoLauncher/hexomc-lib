@@ -16,7 +16,7 @@ pub use version::manifest::{
     VersionEntry, VersionManifest, VersionJson,
 };
 
-pub use download::{download_file, download_batch, DownloadTask};
+pub use download::{download_file, download_file_with_progress, download_batch, DownloadTask};
 
 pub use install::vanilla::{install_vanilla, InstanceConfig, LoaderType, LibEntry, NativeEntry};
 pub use install::fabric::{install_fabric, get_fabric_loader_versions};
@@ -30,14 +30,13 @@ pub use install::loader::{
 };
 
 pub use java::detector::{find_java, JavaInfo};
-pub use java::installer::download_java;
+pub use java::installer::{download_java, download_java_with_progress};
 
 pub use launch::launcher::{launch, launch_with_channel, launch_with_output, LaunchOptions};
 pub use launch::output::{no_output, GameProcess, OutputFn, OutputKind, OutputLine};
 
 pub use auth::microsoft::{
-    request_device_code, poll_device_code, refresh_token,
-    AuthResult, DeviceCodeInfo,
+    AuthResult, DeviceCodeInfo, MicrosoftAuth, MsDeviceCodeResponse,
 };
 pub use auth::session::join_server;
 
@@ -47,13 +46,19 @@ pub use mods::modrinth::{ModrinthClient, MrProject, MrVersion};
 pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
 
 pub use modpack::{
-    detect_modpack_format, install_modpack,
-    ManualDownload, ModpackFormat, ModpackInfo, ModpackInstallResult,
+    detect_modpack_format, install_modpack, install_modpack_files, resolve_forge_version,
+    update_modpack, ManualDownload, ModpackFormat, ModpackInfo, ModpackInstallResult,
+    ModpackUpdateResult,
 };
-pub use modpack::mrpack::{install_mrpack, read_mrpack_index, MrpackIndex};
-pub use modpack::cfpack::{install_cfpack, read_cf_manifest, CfManifest};
+pub use modpack::mrpack::{install_mrpack, install_mrpack_files, read_mrpack_index, MrpackIndex};
+pub use modpack::cfpack::{install_cfpack, install_cfpack_files, read_cf_manifest, CfManifest};
+pub use modpack::ftbpack::{
+    fetch_ftb_version_manifest, get_ftb_pack, install_ftb_pack, install_ftb_pack_files,
+    FtbCurseForgeRef, FtbFile, FtbPack, FtbTarget, FtbVersion, FtbVersionManifest,
+};
 pub use modpack::atpack::{
     fetch_atlauncher_pack_config, get_atlauncher_pack_versions, install_atlauncher_pack,
+    install_atlauncher_pack_files,
     AtPackConfig, AtPackVersion,
 };
 

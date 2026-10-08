@@ -156,7 +156,7 @@ pub fn check_library_rule(rules: &[Rule]) -> bool {
         }
 
         let matches = if let Some(os) = &rule.os {
-            os.name.as_deref().map_or(true, |n| n == current_os)
+            os.name.as_deref().is_none_or(|n| n == current_os)
         } else {
             true
         };
@@ -181,8 +181,8 @@ pub fn check_jvm_rule(rules: &[Rule]) -> bool {
         }
 
         let os_matches = if let Some(os) = &rule.os {
-            let name_ok = os.name.as_deref().map_or(true, |n| n == current_os);
-            let arch_ok = os.arch.as_deref().map_or(true, |a| a == current_arch);
+            let name_ok = os.name.as_deref().is_none_or(|n| n == current_os);
+            let arch_ok = os.arch.as_deref().is_none_or(|a| a == current_arch);
             name_ok && arch_ok
         } else {
             true

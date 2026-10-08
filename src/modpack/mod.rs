@@ -1,15 +1,23 @@
 //! Modpack installation: Modrinth (`.mrpack`), CurseForge (`manifest.json` zip) and
-//! ATLauncher (online packs).
+//! ATLauncher and FTB (online packs).
 //!
 //! Every format follows the same flow: parse the pack, install vanilla + the loader via
 //! `install_with_loader`, extract overrides/configs into `instance/{name}/.minecraft`,
 //! then download the files listed by the pack.
+//! The `*_files` entry points only install pack contents, leaving Minecraft and its
+//! loader for a later launch. They do not create `instance_config.json`.
 
 pub mod atpack;
 pub mod cfpack;
+pub mod ftbpack;
 pub mod mrpack;
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::{Component, Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{HexoError, Result},
@@ -37,8 +45,25 @@ pub struct ModpackInfo {
     pub loader_version: Option<String>,
 }
 
-/// Format of a local modpack file. ATLauncher packs have no file format; use
-/// [`atpack::install_atlauncher_pack`] for those.
+impl ModpackInfo {
+    /// Normalize Forge versions and reject loaders that cannot be installed later.
+    pub(crate) fn validated(mut self) -> Result<Self> {
+        if self.loader == LoaderType::NeoForge && self.mc_version == "1.20.1" {
+            return Err(HexoError::UnsupportedLoader("NeoForge for 1.20.1".into()));
+        }
+        if self.loader == LoaderType::Forge {
+            if let Some(version) = &mut self.loader_version {
+                if let Some(bare) = version.strip_prefix(&format!("{}-", self.mc_version)) {
+                    *version = bare.to_string();
+                }
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// Format of a local modpack file. ATLauncher and FTB packs have no file format; use
+/// [`atpack::install_atlauncher_pack`] or [`ftbpack::install_ftb_pack`] for those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModpackFormat {
     Modrinth,
@@ -61,9 +86,24 @@ pub struct ManualDownload {
 pub struct ModpackInstallResult {
     pub info: ModpackInfo,
     pub manual_downloads: Vec<ManualDownload>,
-    /// Names of entries skipped because their type is not supported.
+    /// Names of entries skipped because their type is unsupported or no download source exists.
     pub skipped: Vec<String>,
 }
+
+/// Result of changing an installed local modpack to another version.
+#[derive(Debug, Clone)]
+pub struct ModpackUpdateResult {
+    pub install: ModpackInstallResult,
+    /// Files managed by the previous pack version and removed by this update.
+    pub removed_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ModpackState {
+    managed_files: BTreeSet<String>,
+}
+
+const MODPACK_STATE_FILE: &str = "modpack_state.json";
 
 /// Detect a modpack's format from the zip contents.
 pub async fn detect_modpack_format(pack_path: &Path) -> Result<ModpackFormat> {
@@ -98,6 +138,28 @@ pub async fn install_modpack(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    let result = install_modpack_inner(
+        pack_path,
+        instance_name,
+        base_dir,
+        java_path,
+        curseforge,
+        progress,
+    )
+    .await?;
+    save_modpack_state(instance_name, base_dir, managed_files).await?;
+    Ok(result)
+}
+
+async fn install_modpack_inner(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    java_path: Option<&Path>,
+    curseforge: Option<&CurseForgeClient>,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
     match detect_modpack_format(pack_path).await? {
         ModpackFormat::Modrinth => {
             mrpack::install_mrpack(pack_path, instance_name, base_dir, java_path, progress).await
@@ -109,6 +171,191 @@ pub async fn install_modpack(
             cfpack::install_cfpack(pack_path, instance_name, base_dir, java_path, cf, progress).await
         }
     }
+}
+
+/// Install or change a local Modrinth/CurseForge modpack version in-place.
+///
+/// Minecraft and its loader are reinstalled when the new pack requests different
+/// versions. Files recorded from an earlier call are removed when the new manifest
+/// no longer contains them. Files added by the user are never included in that state.
+pub async fn update_modpack(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    java_path: Option<&Path>,
+    curseforge: Option<&CurseForgeClient>,
+    progress: ProgressFn,
+) -> Result<ModpackUpdateResult> {
+    let previous = load_modpack_state(instance_name, base_dir).await?;
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    let install = install_modpack_inner(
+        pack_path,
+        instance_name,
+        base_dir,
+        java_path,
+        curseforge,
+        progress,
+    )
+    .await?;
+    let current = ModpackState { managed_files };
+    let game_dir = instance_game_dir(base_dir, instance_name);
+    let removed_files = remove_obsolete_managed_files(
+        &game_dir,
+        previous.as_ref().map(|state| &state.managed_files),
+        &current.managed_files,
+    )
+    .await?;
+
+    save_modpack_state(instance_name, base_dir, current.managed_files).await?;
+
+    Ok(ModpackUpdateResult {
+        install,
+        removed_files,
+    })
+}
+
+/// Extract overrides and download pack files, detecting the local pack format.
+/// Minecraft and the mod loader are not installed; install them later with
+/// [`install_with_loader`] using the returned [`ModpackInfo`]. No Java is required.
+/// A CurseForge client is required for CurseForge archives.
+pub async fn install_modpack_files(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    curseforge: Option<&CurseForgeClient>,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
+    let result = match detect_modpack_format(pack_path).await? {
+        ModpackFormat::Modrinth => {
+            mrpack::install_mrpack_files(pack_path, instance_name, base_dir, progress).await
+        }
+        ModpackFormat::CurseForge => {
+            let cf = curseforge.ok_or_else(|| {
+                HexoError::Other("installing a CurseForge modpack requires a CurseForgeClient".into())
+            })?;
+            cfpack::install_cfpack_files(pack_path, instance_name, base_dir, cf, progress).await
+        }
+    }?;
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    save_modpack_state(instance_name, base_dir, managed_files).await?;
+    Ok(result)
+}
+
+async fn managed_files_for_local(
+    pack_path: &Path,
+    curseforge: Option<&CurseForgeClient>,
+) -> Result<BTreeSet<String>> {
+    match detect_modpack_format(pack_path).await? {
+        ModpackFormat::Modrinth => {
+            let index = mrpack::read_mrpack_index(pack_path).await?;
+            index
+                .files
+                .iter()
+                .filter(|file| file.is_client_supported())
+                .map(|file| normalize_managed_path(&file.path))
+                .collect::<Result<_>>()
+        }
+        ModpackFormat::CurseForge => {
+            let client = curseforge.ok_or_else(|| {
+                HexoError::Other("updating a CurseForge modpack requires a CurseForgeClient".into())
+            })?;
+            let manifest = cfpack::read_cf_manifest(pack_path).await?;
+            let wanted: Vec<_> = manifest.files.iter().filter(|file| file.required).collect();
+            if wanted.is_empty() {
+                return Ok(BTreeSet::new());
+            }
+            let file_ids: Vec<_> = wanted.iter().map(|file| file.file_id).collect();
+            let project_ids: Vec<_> = wanted.iter().map(|file| file.project_id).collect();
+            let projects: HashMap<_, _> = client
+                .get_mods(&project_ids)
+                .await?
+                .into_iter()
+                .map(|project| (project.id, project))
+                .collect();
+            client
+                .get_files(&file_ids)
+                .await?
+                .into_iter()
+                .map(|file| {
+                    let directory = match projects.get(&file.mod_id).and_then(|p| p.class_id) {
+                        Some(12) => "resourcepacks",
+                        Some(6552) => "shaderpacks",
+                        _ => "mods",
+                    };
+                    normalize_managed_path(&format!("{directory}/{}", file.file_name))
+                })
+                .collect::<Result<_>>()
+        }
+    }
+}
+
+async fn save_modpack_state(
+    instance_name: &str,
+    base_dir: &Path,
+    managed_files: BTreeSet<String>,
+) -> Result<()> {
+    let state = ModpackState { managed_files };
+    let state_path = modpack_state_path(instance_name, base_dir);
+    if let Some(parent) = state_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(state_path, serde_json::to_vec_pretty(&state)?).await?;
+    Ok(())
+}
+
+async fn load_modpack_state(
+    instance_name: &str,
+    base_dir: &Path,
+) -> Result<Option<ModpackState>> {
+    let path = modpack_state_path(instance_name, base_dir);
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn modpack_state_path(instance_name: &str, base_dir: &Path) -> PathBuf {
+    base_dir
+        .join("instance")
+        .join(instance_name)
+        .join(MODPACK_STATE_FILE)
+}
+
+fn normalize_managed_path(path: &str) -> Result<String> {
+    let path = path.replace('\\', "/");
+    if path.is_empty() {
+        return Err(HexoError::Other("empty path in modpack manifest".into()));
+    }
+    let root = Path::new(".");
+    let safe = safe_join(root, &path)?;
+    Ok(safe
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+async fn remove_obsolete_managed_files(
+    game_dir: &Path,
+    previous: Option<&BTreeSet<String>>,
+    current: &BTreeSet<String>,
+) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    let Some(previous) = previous else {
+        return Ok(removed);
+    };
+    for relative in previous.difference(current) {
+        let path = safe_join(game_dir, relative)?;
+        if path.is_file() {
+            tokio::fs::remove_file(&path).await?;
+            removed.push(path);
+        }
+    }
+    Ok(removed)
 }
 
 pub(crate) fn instance_game_dir(base_dir: &Path, instance_name: &str) -> PathBuf {
@@ -171,7 +418,7 @@ pub(crate) async fn install_pack_loader(
 
 /// Map a bare Forge version (`47.2.0`) to the full string used by the Forge version list
 /// (`1.20.1-47.2.0`, or legacy forms like `1.7.10-10.13.4.1614-1.7.10`).
-async fn resolve_forge_version(mc_version: &str, loader_version: &str) -> Result<String> {
+pub async fn resolve_forge_version(mc_version: &str, loader_version: &str) -> Result<String> {
     let full = format!("{}-{}", mc_version, loader_version);
     let versions = get_forge_versions(mc_version).await?;
     Ok(versions
@@ -254,6 +501,83 @@ where
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn local_pack_files_install_without_minecraft_or_java() {
+        use std::io::Write;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+        use serde_json::json;
+
+        let cases = [
+            (mrpack::INDEX_FILE, json!({
+                "formatVersion": 1, "game": "minecraft", "versionId": "1.0",
+                "name": "Content Pack", "files": [],
+                "dependencies": {"minecraft": "1.20.1", "forge": "1.20.1-47.2.0"}
+            })),
+            (cfpack::MANIFEST_FILE, json!({
+                "name": "Content Pack", "version": "1.0", "files": [],
+                "minecraft": {"version": "1.20.1", "modLoaders": [{"id": "forge-47.2.0", "primary": true}]}
+            })),
+        ];
+        for (manifest_name, manifest) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let pack_path = temp.path().join("pack.zip");
+            let base = temp.path().join("launcher");
+            {
+                let mut zip = ZipWriter::new(std::fs::File::create(&pack_path).unwrap());
+                let options = SimpleFileOptions::default();
+                zip.start_file(manifest_name, options).unwrap();
+                zip.write_all(manifest.to_string().as_bytes()).unwrap();
+                zip.start_file("overrides/config/a.toml", options).unwrap();
+                zip.write_all(b"enabled = true").unwrap();
+                if manifest_name == mrpack::INDEX_FILE {
+                    zip.start_file("client-overrides/config/a.toml", options).unwrap();
+                    zip.write_all(b"client = true").unwrap();
+                }
+                zip.finish().unwrap();
+            }
+            let client = CurseForgeClient::new("");
+            let cf = (manifest_name == cfpack::MANIFEST_FILE).then_some(&client);
+            let result = install_modpack_files(&pack_path, "content", &base, cf, crate::no_progress()).await.unwrap();
+            let instance = base.join("instance/content");
+            let expected = if manifest_name == mrpack::INDEX_FILE { "client = true" } else { "enabled = true" };
+            assert_eq!(std::fs::read_to_string(instance.join(".minecraft/config/a.toml")).unwrap(), expected);
+            assert!(!instance.join("instance_config.json").exists());
+            assert!(!base.join("libraries").exists());
+            assert!(!base.join("assets").exists());
+            assert_eq!(result.info.name, "Content Pack");
+            assert_eq!(result.info.version.as_deref(), Some("1.0"));
+            assert_eq!(result.info.mc_version, "1.20.1");
+            assert_eq!(result.info.loader, LoaderType::Forge);
+            assert_eq!(result.info.loader_version.as_deref(), Some("47.2.0"));
+            assert!(result.manual_downloads.is_empty());
+            assert!(result.skipped.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_format_rejects_neoforge_1_20_1_in_info() {
+        use serde_json::json;
+        let mr: mrpack::MrpackIndex = serde_json::from_value(json!({
+            "formatVersion": 1, "game": "minecraft", "versionId": "1", "name": "Test", "files": [],
+            "dependencies": {"minecraft": "1.20.1", "neoforge": "47.1.0"}
+        })).unwrap();
+        let cf: cfpack::CfManifest = serde_json::from_value(json!({
+            "minecraft": {"version": "1.20.1", "modLoaders": [{"id": "neoforge-47.1.0"}]}
+        })).unwrap();
+        let at: atpack::AtPackConfig = serde_json::from_value(json!({
+            "version": "1", "minecraft": "1.20.1", "loader": {"type": "neoforge", "metadata": {"version": "47.1.0"}}
+        })).unwrap();
+        let ftb: ftbpack::FtbVersionManifest = serde_json::from_value(json!({
+            "id": 1, "name": "1", "targets": [
+                {"name": "minecraft", "version": "1.20.1"},
+                {"name": "neoforge", "version": "47.1.0"}
+            ]
+        })).unwrap();
+        for result in [mr.info(), cf.info(), at.info("Test"), ftb.info("Test")] {
+            assert!(matches!(result, Err(HexoError::UnsupportedLoader(message)) if message.contains("NeoForge for 1.20.1")));
+        }
+    }
+
     #[test]
     fn safe_join_rejects_escape() {
         let root = Path::new("/game");
@@ -261,6 +585,40 @@ mod tests {
         assert!(safe_join(root, "../evil.jar").is_err());
         assert!(safe_join(root, "mods/../../evil.jar").is_err());
         assert!(safe_join(root, "/etc/passwd").is_err());
+    }
+
+    #[tokio::test]
+    async fn modpack_update_removes_only_obsolete_managed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = temp.path();
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::write(game.join("mods/old.jar"), b"old").unwrap();
+        std::fs::write(game.join("mods/kept.jar"), b"kept").unwrap();
+        std::fs::write(game.join("mods/user.jar"), b"user").unwrap();
+
+        let previous = BTreeSet::from([
+            "mods/old.jar".to_string(),
+            "mods/kept.jar".to_string(),
+        ]);
+        let current = BTreeSet::from(["mods/kept.jar".to_string()]);
+        let removed = remove_obsolete_managed_files(game, Some(&previous), &current)
+            .await
+            .unwrap();
+
+        assert_eq!(removed, vec![game.join("mods/old.jar")]);
+        assert!(!game.join("mods/old.jar").exists());
+        assert!(game.join("mods/kept.jar").exists());
+        assert!(game.join("mods/user.jar").exists());
+    }
+
+    #[test]
+    fn managed_paths_are_normalized_and_cannot_escape() {
+        assert_eq!(
+            normalize_managed_path("mods\\example.jar").unwrap(),
+            "mods/example.jar"
+        );
+        assert!(normalize_managed_path("../outside.jar").is_err());
+        assert!(normalize_managed_path("").is_err());
     }
 
     #[tokio::test]

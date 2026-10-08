@@ -27,6 +27,22 @@ pub struct ModUpdate {
 }
 
 impl ModUpdate {
+    /// Select an exact Modrinth version, including upgrades, downgrades and reinstalls.
+    pub fn modrinth(current: ModInfo, version: MrVersion) -> Self {
+        Self {
+            current,
+            source: UpdateSource::Modrinth(version),
+        }
+    }
+
+    /// Select an exact CurseForge file, including upgrades, downgrades and reinstalls.
+    pub fn curseforge(current: ModInfo, project_id: u64, file: CfModFile) -> Self {
+        Self {
+            current,
+            source: UpdateSource::CurseForge { file, project_id },
+        }
+    }
+
     pub fn version_name(&self) -> &str {
         match &self.source {
             UpdateSource::Modrinth(v) => &v.version_number,
@@ -127,7 +143,26 @@ pub async fn update_mod(update: &ModUpdate, mods_dir: &Path) -> Result<()> {
             url: format!("mod {} has no file name", update.current.name),
         })?;
 
+    let file_name = Path::new(file_name);
+    if file_name.components().count() != 1 || file_name.file_name().is_none() {
+        return Err(HexoError::DownloadFailed {
+            url: format!("mod {} has an unsafe file name", update.current.name),
+        });
+    }
+    if update.current.file_path.parent() != Some(mods_dir) {
+        return Err(HexoError::Other(format!(
+            "current mod is outside the supplied mods directory: {}",
+            update.current.file_path.display()
+        )));
+    }
+
     let new_path = mods_dir.join(file_name);
+    if new_path != update.current.file_path && new_path.exists() {
+        return Err(HexoError::Other(format!(
+            "refusing to overwrite an existing mod: {}",
+            new_path.display()
+        )));
+    }
 
     let task = match update.sha1() {
         Some(sha1) if !sha1.is_empty() => {

@@ -1,8 +1,37 @@
 use hexomc_lib::{
+    fetch_ftb_version_manifest, get_ftb_pack,
     fetch_atlauncher_pack_config, fetch_version_manifest, get_atlauncher_pack_versions,
     install::fabric::get_fabric_loader_versions, install::forge::get_forge_versions,
     install::neoforge::get_neoforge_versions, LoaderType,
 };
+
+#[tokio::test]
+async fn ftb_pack_and_version_manifest() {
+    let pack = get_ftb_pack(134).await.unwrap();
+    assert_eq!(pack.id, 134);
+    assert!(!pack.name.is_empty());
+    let manifest = fetch_ftb_version_manifest(134, 100422).await.unwrap();
+    let info = manifest.info(&pack.name).unwrap();
+    assert_eq!(info.mc_version, "1.21.1");
+    assert_eq!(info.loader, LoaderType::NeoForge);
+    assert!(!manifest.files.is_empty());
+}
+
+#[tokio::test]
+async fn ftb_legacy_curseforge_references() {
+    let manifest = fetch_ftb_version_manifest(35, 37).await.unwrap();
+    let info = manifest.info("FTB Revelation").unwrap();
+    assert_eq!(info.loader, LoaderType::Forge);
+    assert_eq!(info.loader_version.as_deref(), Some("14.23.5.2846"));
+    assert!(manifest.files.iter().any(|f| f.curseforge.is_some()));
+}
+
+#[tokio::test]
+async fn ftb_missing_pack_and_version() {
+    assert!(matches!(get_ftb_pack(999999999).await, Err(hexomc_lib::HexoError::VersionNotFound(_))));
+    assert!(matches!(fetch_ftb_version_manifest(134, 999999999).await,
+        Err(hexomc_lib::HexoError::VersionNotFound(_))));
+}
 
 #[tokio::test]
 async fn atlauncher_pack_versions() {

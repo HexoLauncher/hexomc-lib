@@ -257,7 +257,7 @@ pub async fn install_forge_like(
     config.loader_type = loader_type;
 
     // Prepend the new libs so Forge takes precedence over vanilla.
-    new_lib_entries.extend(config.lib_list.drain(..));
+    new_lib_entries.append(&mut config.lib_list);
     config.lib_list = new_lib_entries;
 
     config.save(&instance_dir).await?;
@@ -325,7 +325,7 @@ async fn install_forge_legacy(
         .map(|s| s.to_string())
         .collect();
     // Prepend new libs (launchwrapper / forge must load before vanilla libs).
-    new_lib_entries.extend(config.lib_list.drain(..));
+    new_lib_entries.append(&mut config.lib_list);
     config.lib_list = new_lib_entries;
     config.save(&instance_dir).await?;
 
