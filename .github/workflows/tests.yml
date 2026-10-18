@@ -41,7 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --test integration -- --nocapture
-      - run: 'cargo test --locked --lib version::manifest::tests:: -- --ignored --nocapture'
+      - run: "cargo test --locked --lib version::manifest::tests:: -- --ignored --nocapture"
 
   matrix:
     name: Resolve Minecraft and loader versions
@@ -51,6 +51,8 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+      - name: Test matrix generation
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py' -v
       - id: matrix
         run: python3 .github/scripts/test_matrix.py
 
@@ -68,8 +70,8 @@ jobs:
       MC_TEST_LOADER: ${{ matrix.loader }}
       MC_TEST_LOADER_VERSION: ${{ matrix.loader_version }}
       MC_TEST_DIR: ${{ github.workspace }}/mc_data/ci
-      LIBGL_ALWAYS_SOFTWARE: '1'
-      ALSOFT_DRIVERS: 'null'
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      ALSOFT_DRIVERS: "null"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

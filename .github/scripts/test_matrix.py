@@ -20,12 +20,24 @@ def build_matrix():
     missing = set(VERSIONS) - known_versions
     if missing:
         raise ValueError(f"Minecraft versions missing from Mojang: {sorted(missing)}")
-    forge = fetch("https://files.minecraftforge.net/net/minecraftforge/forge/maven-metadata.json")
+    forge = fetch(
+        "https://files.minecraftforge.net/net/minecraftforge/forge/maven-metadata.json"
+    )
+    fabric_games = {
+        entry["version"]
+        for entry in fetch("https://meta.fabricmc.net/v2/versions/game")
+    }
     matrix = []
     summary = ["| Minecraft | Vanilla | Fabric | Forge |", "| --- | --- | --- | --- |"]
     for version in VERSIONS:
-        fabric = fetch(f"https://meta.fabricmc.net/v2/versions/loader/{version}")
-        fabric_versions = [entry["loader"]["version"] for entry in fabric if entry["loader"]["stable"]]
+        fabric = (
+            fetch(f"https://meta.fabricmc.net/v2/versions/loader/{version}")
+            if version in fabric_games
+            else []
+        )
+        fabric_versions = [
+            entry["loader"]["version"] for entry in fabric if entry["loader"]["stable"]
+        ]
         forge_versions = forge.get(version, [])
         if version == "26.3" and not fabric_versions:
             raise ValueError("Fabric must be available for Minecraft 26.3")
@@ -37,10 +49,18 @@ def build_matrix():
         if forge_versions:
             loaders["forge"] = max(
                 forge_versions,
-                key=lambda value: tuple(int(part) for part in re.findall(r"\d+", value)),
+                key=lambda value: tuple(
+                    int(part) for part in re.findall(r"\d+", value)
+                ),
             )
         for loader, loader_version in loaders.items():
-            matrix.append({"minecraft": version, "loader": loader, "loader_version": loader_version})
+            matrix.append(
+                {
+                    "minecraft": version,
+                    "loader": loader,
+                    "loader_version": loader_version,
+                }
+            )
         summary.append(
             f"| {version} | Test | {loaders.get('fabric', 'Unsupported by upstream')} | "
             f"{loaders.get('forge', 'Unsupported by upstream')} |"
