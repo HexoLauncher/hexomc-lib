@@ -1,0 +1,108 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --lib --test installation
+      - run: cargo test --locked --doc
+      - run: cargo check --locked --all-targets
+
+  integration:
+    name: API integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --test integration -- --nocapture
+      - run: 'cargo test --locked --lib version::manifest::tests:: -- --ignored --nocapture'
+
+  matrix:
+    name: Resolve Minecraft and loader versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        run: python3 .github/scripts/test_matrix.py
+
+  installation:
+    name: Minecraft ${{ matrix.minecraft }} / ${{ matrix.loader }}
+    needs: matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
+    env:
+      MC_TEST_VERSION: ${{ matrix.minecraft }}
+      MC_TEST_LOADER: ${{ matrix.loader }}
+      MC_TEST_LOADER_VERSION: ${{ matrix.loader_version }}
+      MC_TEST_DIR: ${{ github.workspace }}/mc_data/ci
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      ALSOFT_DRIVERS: 'null'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: installation
+      - name: Restore Minecraft downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            mc_data/ci/assets
+            mc_data/ci/libraries
+            mc_data/ci/java
+            mc_data/ci/instance/*/*.jar
+          key: minecraft-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.minecraft }}-${{ matrix.loader }}-${{ matrix.loader_version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            minecraft-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.minecraft }}-${{ matrix.loader }}-
+      - name: Install display and audio dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth xdotool libgl1-mesa-dri libglx-mesa0 libasound2t64 libopenal1 libxtst6 libxrandr2 libxi6 libxcursor1 libxinerama1
+      - name: Install Minecraft and verify client startup
+        run: xvfb-run -a -s '-screen 0 1280x1024x24 +extension GLX' cargo test --locked --test installation install_and_launch -- --ignored --exact --nocapture
+      - name: Upload startup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-${{ matrix.minecraft }}-${{ matrix.loader }}-logs
+          include-hidden-files: true
+          if-no-files-found: ignore
+          path: |
+            mc_data/ci/diagnostics
+            mc_data/ci/instance/*/instance_config.json
+            mc_data/ci/instance/*/.minecraft/logs
+            mc_data/ci/instance/*/.minecraft/crash-reports
+            mc_data/ci/instance/*/.minecraft/hs_err_pid*.log
