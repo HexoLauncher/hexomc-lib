@@ -2,10 +2,7 @@ use std::{
     error::Error,
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -37,6 +34,88 @@ fn version_json() -> serde_json::Value {
         "libraries": [],
         "downloads": {"client": {"sha1": "", "size": 0, "url": ""}}
     })
+}
+
+#[test]
+fn legacy_metadata_without_java_version_defaults_to_java_8() {
+    let mut value = version_json();
+    value.as_object_mut().unwrap().remove("javaVersion");
+    let version: VersionJson = serde_json::from_value(value).unwrap();
+    assert_eq!(version.java_version.major_version, 8);
+}
+
+#[test]
+fn explicit_java_version_is_preserved() {
+    let mut value = version_json();
+    value["javaVersion"] = json!({"majorVersion": 25});
+    let version: VersionJson = serde_json::from_value(value).unwrap();
+    assert_eq!(version.java_version.major_version, 25);
+}
+
+#[derive(Default)]
+struct StartupLog {
+    pending_report: bool,
+    crashed: bool,
+}
+
+impl StartupLog {
+    fn observe(&mut self, line: &str) {
+        if line.contains("---- Minecraft Crash Report ----") {
+            self.pending_report = true;
+        }
+        if self.pending_report {
+            if let Some(description) = line.trim().strip_prefix("Description:") {
+                self.pending_report = false;
+                if description.trim() != "Loading screen debug info" {
+                    self.crashed = true;
+                }
+            }
+        }
+        if [
+            "Minecraft has crashed!",
+            "#@!@# Game crashed!",
+            "Exception in thread \"main\"",
+            "Reported exception thrown!",
+        ]
+        .iter()
+        .any(|marker| line.contains(marker))
+        {
+            self.crashed = true;
+        }
+    }
+}
+
+#[test]
+fn forge_splash_diagnostics_are_not_a_startup_crash() {
+    let mut log = StartupLog::default();
+    for line in [
+        "[STDOUT]: [cpw.mods.fml.client.SplashProgress:start:188]: ---- Minecraft Crash Report ----",
+        "// I feel sad now :(",
+        "Time: 10/18/26 7:18 PM",
+        "Description: Loading screen debug info",
+        "This is just a prompt for computer specs to be printed. THIS IS NOT A ERROR",
+        "[FML]: Completed early MinecraftForge initialization",
+    ] {
+        log.observe(line);
+    }
+    assert!(!log.crashed);
+    log.observe("---- Minecraft Crash Report ----");
+    log.observe("Description: Initializing game");
+    assert!(log.crashed);
+}
+
+#[test]
+fn fatal_startup_markers_are_detected_without_a_crash_report() {
+    for marker in [
+        "Minecraft has crashed!",
+        "#@!@# Game crashed! Crash report saved to: report.txt",
+        "Exception in thread \"main\" java.lang.NoClassDefFoundError",
+        "Reported exception thrown!",
+    ] {
+        let mut log = StartupLog::default();
+        log.observe(marker);
+        assert!(log.crashed, "Missed fatal marker: {marker}");
+    }
 }
 
 #[test]
@@ -127,6 +206,7 @@ async fn verify_installation(
     assert!(!config.start_args.is_empty());
     assert!(config.java_version >= 8);
     assert!(directory.join(".minecraft/mods").is_dir());
+    assert!(directory.join(".minecraft/config").is_dir());
     assert!(directory.join(format!("{version}.jar")).metadata()?.len() > 0);
     assert!(root
         .join("assets/indexes")
@@ -173,21 +253,10 @@ async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf)
     let output = Arc::new(Mutex::new(std::fs::File::create(
         diagnostics.join(format!("{instance}-{stage}.log")),
     )?));
-    let crashed = Arc::new(AtomicBool::new(false));
-    let crash_output = crashed.clone();
+    let startup_log = Arc::new(Mutex::new(StartupLog::default()));
+    let crash_output = startup_log.clone();
     let sink: OutputFn = Arc::new(move |line| {
-        if [
-            "---- Minecraft Crash Report ----",
-            "Minecraft has crashed!",
-            "#@!@# Game crashed!",
-            "Exception in thread \"main\"",
-            "Reported exception thrown!",
-        ]
-        .iter()
-        .any(|marker| line.line.contains(marker))
-        {
-            crash_output.store(true, Ordering::Relaxed);
-        }
+        crash_output.lock().unwrap().observe(&line.line);
         println!("{:?}: {}", line.kind, line.line);
         writeln!(output.lock().unwrap(), "{:?}: {}", line.kind, line.line).unwrap();
     });
@@ -199,7 +268,7 @@ async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf)
     let result = timeout(Duration::from_secs(180), async {
         let mut visible_since = None;
         loop {
-            if crashed.load(Ordering::Relaxed) {
+            if startup_log.lock().unwrap().crashed {
                 return Err("Minecraft reported a startup crash".into());
             }
             if let Some(status) = process.0.try_wait()? {
@@ -223,7 +292,7 @@ async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf)
     kill_result?;
     wait_result?;
     assert!(
-        !crashed.load(Ordering::Relaxed),
+        !startup_log.lock().unwrap().crashed,
         "Minecraft reported a startup crash"
     );
     Ok(())

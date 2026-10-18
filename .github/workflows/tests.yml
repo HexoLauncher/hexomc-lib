@@ -71,6 +71,7 @@ jobs:
       MC_TEST_LOADER_VERSION: ${{ matrix.loader_version }}
       MC_TEST_DIR: ${{ github.workspace }}/mc_data/ci
       LIBGL_ALWAYS_SOFTWARE: "1"
+      SDL_VIDEO_DRIVER: "x11"
       ALSOFT_DRIVERS: "null"
     steps:
       - uses: actions/checkout@v4
@@ -92,9 +93,9 @@ jobs:
       - name: Install display and audio dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xauth xdotool libgl1-mesa-dri libglx-mesa0 libasound2t64 libopenal1 libxtst6 libxrandr2 libxi6 libxcursor1 libxinerama1
+          sudo apt-get install -y xvfb xauth xdotool x11-xserver-utils mesa-utils libgl1-mesa-dri libglx-mesa0 libegl1 mesa-vulkan-drivers libvulkan1 vulkan-tools libasound2t64 libopenal1 libxtst6 libxrandr2 libxi6 libxcursor1 libxinerama1
       - name: Install Minecraft and verify client startup
-        run: xvfb-run -a -s '-screen 0 1280x1024x24 +extension GLX' cargo test --locked --test installation install_and_launch -- --ignored --exact --nocapture
+        run: xvfb-run -a -s '-screen 0 1280x1024x24 +extension GLX' bash .github/scripts/run_installation_test.sh
       - name: Upload startup diagnostics
         if: always()
         uses: actions/upload-artifact@v4

@@ -8,7 +8,7 @@ use crate::{
     version::manifest::{
         fetch_asset_index, fetch_version_manifest, fetch_version_json,
         check_library_rule, check_jvm_rule,
-        Argument, ArgumentValue, VersionJson,
+        Argument, ArgumentValue, AssetIndexData, VersionJson,
     },
 };
 
@@ -101,7 +101,14 @@ where
     let (lib_list, natives) = download_libraries(&version_json, &lib_dir, progress.clone()).await?;
 
     progress(2, 4, "downloading assets");
-    download_assets(&version_json, &assets_dir, progress.clone()).await?;
+    let asset_data = download_assets(&version_json, &assets_dir, progress.clone()).await?;
+    materialize_legacy_assets(
+        &asset_data,
+        &assets_dir,
+        &instance_dir.join(".minecraft"),
+        &version_json.asset_index.id,
+    )
+    .await?;
 
     progress(3, 4, "downloading client jar");
     let client_jar = instance_dir.join(format!("{}.jar", version_id));
@@ -142,6 +149,7 @@ async fn init_instance_dirs(
     for dir in &[
         instance_dir.to_path_buf(),
         minecraft_dir.join("mods"),
+        minecraft_dir.join("config"),
         minecraft_dir.join("resourcepacks"),
         minecraft_dir.join("saves"),
         minecraft_dir.join("screenshots"),
@@ -235,7 +243,7 @@ async fn download_assets(
     version_json: &VersionJson,
     assets_dir: &Path,
     progress: impl Fn(usize, usize, &str) + Send + Sync + Clone + 'static,
-) -> Result<()> {
+) -> Result<AssetIndexData> {
     let index = &version_json.asset_index;
 
     let index_path = assets_dir
@@ -256,7 +264,45 @@ async fn download_assets(
     download_batch(tasks, 32, move |done, _| {
         progress(done, total, "downloading assets");
     })
-    .await
+    .await?;
+    Ok(asset_data)
+}
+
+async fn materialize_legacy_assets(
+    index: &AssetIndexData,
+    assets_dir: &Path,
+    minecraft_dir: &Path,
+    asset_id: &str,
+) -> Result<()> {
+    let mut roots = Vec::new();
+    if index.virtual_assets {
+        roots.push(assets_dir.join("virtual").join(asset_id));
+    }
+    if index.map_to_resources {
+        roots.push(minecraft_dir.join("resources"));
+    }
+    if roots.is_empty() {
+        return Ok(());
+    }
+    for (name, object) in &index.objects {
+        if Path::new(name)
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(HexoError::Other(format!("Unsafe asset path: {name}")));
+        }
+        let prefix = object.hash.get(..2)
+            .ok_or_else(|| HexoError::Other(format!("Invalid asset hash: {}", object.hash)))?;
+        let source = assets_dir.join("objects").join(prefix).join(&object.hash);
+        for root in &roots {
+            let target = root.join(name);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::copy(&source, &target).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Parse JVM + game args, expanding conditional args by rule.
@@ -306,5 +352,66 @@ fn native_key_for_platform() -> &'static str {
         "osx"
     } else {
         "linux"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn legacy_assets_are_copied_to_named_paths_and_resources() {
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        for (virtual_assets, resources) in [(true, false), (false, true), (true, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let assets = root.path().join("assets");
+            let minecraft = root.path().join("instance/.minecraft");
+            init_instance_dirs(
+                &root.path().join("instance"),
+                &assets,
+                &root.path().join("libraries"),
+            )
+            .await.unwrap();
+            assert!(minecraft.join("config").is_dir());
+            fs::create_dir_all(assets.join("objects/01")).await.unwrap();
+            fs::write(assets.join("objects/01").join(hash), b"asset bytes").await.unwrap();
+            let index = serde_json::from_value(json!({
+                "virtual": virtual_assets,
+                "map_to_resources": resources,
+                "objects": {"sound/test.ogg": {"hash": hash, "size": 11}}
+            })).unwrap();
+            materialize_legacy_assets(&index, &assets, &minecraft, "legacy").await.unwrap();
+            assert_eq!(assets.join("virtual/legacy").exists(), virtual_assets);
+            assert_eq!(minecraft.join("resources").exists(), resources);
+            if virtual_assets {
+                assert_eq!(fs::read(assets.join("virtual/legacy/sound/test.ogg")).await.unwrap(), b"asset bytes");
+            }
+            if resources {
+                assert_eq!(fs::read(minecraft.join("resources/sound/test.ogg")).await.unwrap(), b"asset bytes");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_asset_paths_cannot_escape_the_mapping_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let index = serde_json::from_value(json!({
+            "virtual": true,
+            "objects": {"../escape": {"hash": "0123456789abcdef", "size": 1}}
+        })).unwrap();
+        assert!(materialize_legacy_assets(&index, root.path(), root.path(), "legacy")
+            .await.is_err());
+    }
+
+    #[tokio::test]
+    async fn modern_asset_indexes_need_no_named_mapping() {
+        let root = tempfile::tempdir().unwrap();
+        let index = serde_json::from_value(json!({
+            "objects": {"sound/test.ogg": {"hash": "0123456789abcdef", "size": 1}}
+        })).unwrap();
+        materialize_legacy_assets(&index, root.path(), root.path(), "modern").await.unwrap();
+        assert!(!root.path().join("virtual").exists());
+        assert!(!root.path().join("resources").exists());
     }
 }

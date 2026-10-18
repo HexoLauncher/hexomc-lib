@@ -36,6 +36,7 @@ pub struct VersionJson {
     pub main_class: String,
     pub asset_index: AssetIndex,
     pub assets: String,
+    #[serde(default)]
     pub java_version: JavaVersionInfo,
     pub libraries: Vec<Library>,
     pub arguments: Option<Arguments>,
@@ -56,6 +57,12 @@ pub struct AssetIndex {
 #[serde(rename_all = "camelCase")]
 pub struct JavaVersionInfo {
     pub major_version: u32,
+}
+
+impl Default for JavaVersionInfo {
+    fn default() -> Self {
+        Self { major_version: 8 }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -135,6 +142,10 @@ pub struct DownloadEntry {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AssetIndexData {
     pub objects: HashMap<String, AssetObject>,
+    #[serde(default, rename = "virtual")]
+    pub virtual_assets: bool,
+    #[serde(default)]
+    pub map_to_resources: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

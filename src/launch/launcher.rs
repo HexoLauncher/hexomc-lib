@@ -299,6 +299,21 @@ fn build_argdata(
     map.insert("assets_index_name".into(), config.assets_id.clone());
     map.insert("auth_uuid".into(), auth_uuid.to_string());
     map.insert("auth_access_token".into(), auth_token.to_string());
+    map.insert(
+        "auth_session".into(),
+        if opts.auth_token.is_some() {
+            format!("token:{auth_token}:{auth_uuid}")
+        } else {
+            "-".into()
+        },
+    );
+    let virtual_assets = base_dir.join("assets/virtual").join(&config.assets_id);
+    let game_assets = if virtual_assets.is_dir() {
+        virtual_assets
+    } else {
+        base_dir.join("assets")
+    };
+    map.insert("game_assets".into(), path_str(&game_assets));
     map.insert("clientid".into(), "-1".into());
     map.insert("auth_xuid".into(), xuid.to_string());
     map.insert("user_type".into(), user_type.to_string());
@@ -366,6 +381,37 @@ fn classpath_sep() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_launch_resolves_session_and_named_assets() {
+        let root = tempfile::tempdir().unwrap();
+        let instance = root.path().join("instance/test");
+        let assets = root.path().join("assets/virtual/legacy");
+        std::fs::create_dir_all(&assets).unwrap();
+        let config = InstanceConfig {
+            version_id: "1.6.4".into(),
+            loader_type: crate::install::LoaderType::Vanilla,
+            main_class: "net.minecraft.client.main.Main".into(),
+            start_args: vec![],
+            lib_list: vec![],
+            natives: vec![],
+            assets_id: "legacy".into(),
+            java_version: 8,
+        };
+        let mut options = LaunchOptions::offline("test", "java".into(), "Steve");
+        let data = build_argdata(&options, root.path(), &instance, &config, "classpath");
+        assert_eq!(data["auth_session"], "-");
+        assert_eq!(data["game_assets"], path_str(&assets));
+        assert_eq!(replace_placeholders("${auth_session}:${game_assets}", &data, &config.main_class),
+            format!("-:{}", path_str(&assets)));
+        options.auth_token = Some("access-token".into());
+        options.auth_uuid = Some("player-uuid".into());
+        let data = build_argdata(&options, root.path(), &instance, &config, "classpath");
+        assert_eq!(data["auth_session"], "token:access-token:player-uuid");
+        std::fs::remove_dir(&assets).unwrap();
+        let data = build_argdata(&options, root.path(), &instance, &config, "classpath");
+        assert_eq!(data["game_assets"], path_str(&root.path().join("assets")));
+    }
 
     fn make_data() -> HashMap<String, String> {
         let mut m = HashMap::new();
