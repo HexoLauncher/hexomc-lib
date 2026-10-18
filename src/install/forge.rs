@@ -8,7 +8,8 @@ use tokio::fs;
 use crate::{
     download::{download_batch, download_file, DownloadTask},
     error::{HexoError, Result},
-    install::vanilla::{InstanceConfig, LibEntry, LoaderType},
+    install::vanilla::{native_key_for_platform, InstanceConfig, LibEntry, LoaderType, NativeEntry},
+    version::manifest::{check_library_rule, Rule},
 };
 
 const FORGE_META_URL: &str =
@@ -105,6 +106,10 @@ pub struct LegacyLibrary {
     /// Whether the client needs it (None = required).
     #[serde(default)]
     pub clientreq: Option<bool>,
+    #[serde(default)]
+    pub rules: Option<Vec<Rule>>,
+    #[serde(default)]
+    pub natives: Option<HashMap<String, String>>,
 }
 
 /// Available Forge versions for the given MC version.
@@ -286,32 +291,11 @@ async fn install_forge_legacy(
     }
     extract_file_from_zip(installer_path, &profile.install.file_path, &universal_dest).await?;
 
-    let mut lib_tasks: Vec<DownloadTask> = Vec::new();
-    let mut new_lib_entries: Vec<LibEntry> = Vec::new();
-    for lib in &profile.version_info.libraries {
-        if lib.clientreq == Some(false) {
-            continue;
-        }
-        let path = resolve_maven_path(&lib_dir, &lib.name);
-        new_lib_entries.push(LibEntry {
-            name: lib.name.clone(),
-            path: path.clone(),
-            sha1: String::new(),
-        });
-
-        // Forge universal already came from the installer.
-        if lib.name == profile.install.path {
-            continue;
-        }
-
-        let base = lib
-            .url
-            .clone()
-            .unwrap_or_else(|| "https://libraries.minecraft.net/".to_string());
-        let sep = if base.ends_with('/') { "" } else { "/" };
-        let url = format!("{}{}{}", base, sep, maven_relative_path(&lib.name));
-        lib_tasks.push(DownloadTask::new(url, &path));
-    }
+    let (lib_tasks, mut new_lib_entries, new_native_entries) = legacy_library_downloads(
+        profile,
+        &lib_dir,
+        native_key_for_platform(),
+    );
     download_batch(lib_tasks, 8, |_, _| {}).await?;
 
     let mut config = InstanceConfig::load(&instance_dir).await?;
@@ -327,9 +311,61 @@ async fn install_forge_legacy(
     // Prepend new libs (launchwrapper / forge must load before vanilla libs).
     new_lib_entries.append(&mut config.lib_list);
     config.lib_list = new_lib_entries;
+    config.natives.extend(new_native_entries);
     config.save(&instance_dir).await?;
 
     Ok(())
+}
+
+fn legacy_library_downloads(
+    profile: &LegacyInstallProfile,
+    lib_dir: &Path,
+    native_os: &str,
+) -> (Vec<DownloadTask>, Vec<LibEntry>, Vec<NativeEntry>) {
+    let mut tasks = Vec::new();
+    let mut libraries = Vec::new();
+    let mut natives = Vec::new();
+    for lib in &profile.version_info.libraries {
+        if lib.clientreq == Some(false)
+            || lib.rules.as_ref().is_some_and(|rules| !check_library_rule(rules))
+        {
+            continue;
+        }
+        let coordinate = if let Some(classifiers) = &lib.natives {
+            let Some(classifier) = classifiers.get(native_os) else {
+                continue;
+            };
+            let arch = if cfg!(target_pointer_width = "64") { "64" } else { "32" };
+            format!("{}:{}", lib.name, classifier.replace("${arch}", arch))
+        } else {
+            lib.name.clone()
+        };
+        let path = resolve_maven_path(lib_dir, &coordinate);
+        if lib.natives.is_some() {
+            natives.push(NativeEntry {
+                name: lib.name.clone(),
+                path: path.clone(),
+                sha1: String::new(),
+            });
+        } else {
+            libraries.push(LibEntry {
+                name: lib.name.clone(),
+                path: path.clone(),
+                sha1: String::new(),
+            });
+            if lib.name == profile.install.path {
+                continue;
+            }
+        }
+        let base = lib
+            .url
+            .as_deref()
+            .unwrap_or("https://libraries.minecraft.net/");
+        let sep = if base.ends_with('/') { "" } else { "/" };
+        let url = format!("{}{}{}", base, sep, maven_relative_path(&coordinate));
+        tasks.push(DownloadTask::new(url, path));
+    }
+    (tasks, libraries, natives)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -539,4 +575,119 @@ fn path_str(p: &Path) -> String {
 
 fn classpath_separator() -> &'static str {
     if cfg!(target_os = "windows") { ";" } else { ":" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn legacy_profile(libraries: serde_json::Value) -> LegacyInstallProfile {
+        serde_json::from_value(json!({
+            "install": {
+                "path": "net.minecraftforge:minecraftforge:9.11.1.1345",
+                "filePath": "minecraftforge-universal-1.6.4-9.11.1.1345.jar"
+            },
+            "versionInfo": {
+                "mainClass": "net.minecraft.launchwrapper.Launch",
+                "minecraftArguments": "--tweakClass cpw.mods.fml.common.launcher.FMLTweaker",
+                "libraries": libraries
+            }
+        })).unwrap()
+    }
+
+    #[test]
+    fn legacy_native_archives_use_classifiers_and_stay_off_the_classpath() {
+        let profile = legacy_profile(json!([
+            {"name": "net.minecraftforge:minecraftforge:9.11.1.1345"},
+            {"name": "net.minecraft:launchwrapper:1.8"},
+            {
+                "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.0",
+                "natives": {
+                    "linux": "natives-linux",
+                    "windows": "natives-windows",
+                    "osx": "natives-osx"
+                }
+            },
+            {
+                "name": "net.java.jinput:jinput-platform:2.0.5",
+                "natives": {"linux": "natives-linux", "windows": "natives-windows"}
+            }
+        ]));
+        for platform in ["linux", "windows", "osx"] {
+            let (tasks, libraries, natives) = legacy_library_downloads(
+                &profile, Path::new("libraries"), platform,
+            );
+            assert_eq!(libraries.len(), 2);
+            assert_eq!(libraries[0].name, profile.install.path);
+            assert_eq!(libraries[1].name, "net.minecraft:launchwrapper:1.8");
+            assert_eq!(natives.len(), if platform == "osx" { 1 } else { 2 });
+            assert_eq!(tasks.len(), natives.len() + 1);
+            let expected = format!(
+                "org/lwjgl/lwjgl/lwjgl-platform/2.9.0/lwjgl-platform-2.9.0-natives-{platform}.jar"
+            );
+            assert!(tasks.iter().any(|task| {
+                task.url == format!("https://libraries.minecraft.net/{expected}")
+                    && task.path == Path::new("libraries").join(&expected)
+            }));
+            assert!(tasks.iter().all(|task| !task.url.ends_with("lwjgl-platform-2.9.0.jar")));
+        }
+    }
+
+    #[test]
+    fn legacy_library_rules_and_client_requirements_are_respected() {
+        let other_os = if cfg!(target_os = "windows") { "linux" } else { "windows" };
+        let profile = legacy_profile(json!([
+            {"name": "test:server-only:1", "clientreq": false},
+            {"name": "test:other-os:1", "rules": [{"action": "allow", "os": {"name": other_os}}]},
+            {"name": "test:disallowed:1", "rules": [{"action": "disallow"}]},
+            {"name": "test:no-linux-native:1", "natives": {"windows": "natives-windows"}},
+            {"name": "test:required:1", "clientreq": true, "url": "https://maven.minecraftforge.net"}
+        ]));
+        let (tasks, libraries, natives) = legacy_library_downloads(
+            &profile, Path::new("libraries"), "linux",
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].url, "https://maven.minecraftforge.net/test/required/1/required-1.jar");
+        assert_eq!(libraries.len(), 1);
+        assert!(natives.is_empty());
+    }
+
+    #[test]
+    fn legacy_native_classifiers_expand_architecture() {
+        let profile = legacy_profile(json!([{
+            "name": "test:native:1",
+            "natives": {"windows": "natives-windows-${arch}"}
+        }]));
+        let (tasks, libraries, natives) = legacy_library_downloads(
+            &profile, Path::new("libraries"), "windows",
+        );
+        let arch = if cfg!(target_pointer_width = "64") { "64" } else { "32" };
+        assert!(tasks[0].url.ends_with(&format!("native-1-natives-windows-{arch}.jar")));
+        assert!(libraries.is_empty());
+        assert_eq!(natives.len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network"]
+    async fn legacy_1_6_4_installer_download_urls_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = root.path().join("installer.jar");
+        download_file(&DownloadTask::new(
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/1.6.4-9.11.1.1345/forge-1.6.4-9.11.1.1345-installer.jar",
+            &installer,
+        )).await.unwrap();
+        let profile: LegacyInstallProfile = read_json_from_zip(&installer, "install_profile.json")
+            .await.unwrap();
+        let (tasks, libraries, natives) = legacy_library_downloads(
+            &profile, &root.path().join("libraries"), "linux",
+        );
+        assert_eq!(natives.len(), 2);
+        assert!(libraries.iter().all(|library| !library.name.contains("-platform:")));
+        let client = reqwest::Client::new();
+        for task in tasks {
+            let response = client.head(&task.url).send().await.unwrap();
+            assert!(response.status().is_success(), "{}: {}", task.url, response.status());
+        }
+    }
 }

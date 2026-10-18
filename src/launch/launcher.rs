@@ -176,6 +176,7 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
     if is_legacy {
         for jvm_arg in [
             "-Djava.library.path=${natives_directory}",
+            "-Djna.library.path=${natives_directory}",
             "-cp",
             "${classpath}",
             "${mainClass}",
@@ -381,6 +382,42 @@ fn classpath_sep() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn legacy_launch_exposes_extracted_narrator_library_to_jna() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let instance = root.path().join("instance/test");
+        std::fs::create_dir_all(instance.join(".minecraft")).unwrap();
+        let native_jar = root.path().join("narrator-natives.jar");
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&native_jar).unwrap());
+        archive.start_file("libfliteWrapper.so", zip::write::SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"native library fixture").unwrap();
+        archive.finish().unwrap();
+        let config = InstanceConfig {
+            version_id: "1.12.2".into(),
+            loader_type: crate::install::LoaderType::Forge,
+            main_class: "net.minecraft.launchwrapper.Launch".into(),
+            start_args: vec!["--username".into(), "${auth_player_name}".into()],
+            lib_list: vec![],
+            natives: vec![crate::install::NativeEntry {
+                name: "com.mojang:text2speech:1.10.3".into(),
+                path: native_jar,
+                sha1: String::new(),
+            }],
+            assets_id: "1.12".into(),
+            java_version: 8,
+        };
+        config.save(&instance).await.unwrap();
+        let options = LaunchOptions::offline("test", "java".into(), "Steve");
+        let prepared = prepare_command(&options, root.path()).await.unwrap();
+        let args: Vec<_> = prepared.command.get_args().map(|arg| arg.to_string_lossy()).collect();
+        let jna = args.iter().position(|arg| arg.starts_with("-Djna.library.path=")).unwrap();
+        let main = args.iter().position(|arg| arg == &config.main_class).unwrap();
+        assert!(jna < main);
+        assert_eq!(args[jna], format!("-Djna.library.path={}", path_str(&instance.join("natives").canonicalize().unwrap())));
+        assert_eq!(std::fs::read(instance.join("natives/libfliteWrapper.so")).unwrap(), b"native library fixture");
+    }
 
     #[test]
     fn legacy_launch_resolves_session_and_named_assets() {

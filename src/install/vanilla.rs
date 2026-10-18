@@ -345,7 +345,7 @@ fn collect_arg(arg: &Argument, out: &mut Vec<String>, is_jvm: bool) {
     }
 }
 
-fn native_key_for_platform() -> &'static str {
+pub(crate) fn native_key_for_platform() -> &'static str {
     if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
