@@ -2,9 +2,15 @@
 set -euo pipefail
 
 mkdir -p "$MC_TEST_DIR/diagnostics"
-export XDG_RUNTIME_DIR
-XDG_RUNTIME_DIR=$(mktemp -d)
-trap 'rmdir "$XDG_RUNTIME_DIR"' EXIT
+runtime_dir=$(mktemp -d)
+trap 'rm -rf -- "$runtime_dir"' EXIT
+export XDG_RUNTIME_DIR="$runtime_dir"
+export ALSA_CONFIG_PATH="$runtime_dir/asound.conf"
+cat > "$ALSA_CONFIG_PATH" <<'EOF'
+pcm.!default {
+    type null
+}
+EOF
 
 lavapipe_drivers=(/usr/share/vulkan/icd.d/lvp_icd*.json)
 if [[ ! -f "${lavapipe_drivers[0]}" ]]; then

@@ -111,6 +111,13 @@ pub async fn launch_with_channel(
 /// Name of the `@argfile`, written into `.minecraft/` (cwd of the game).
 const ARGFILE_NAME: &str = "tempcmd.txt";
 
+/// Legacy FML rejects Mojang's SHA1/DSA-signed client jars on current Java 8 builds,
+/// which no longer accept that signature, and exits before the game starts.
+const LEGACY_FML_IGNORE_CERTIFICATES: &str = "-Dfml.ignoreInvalidMinecraftCertificates=true";
+
+/// Legacy FML aborts when its patch checksums differ from the loaded classes.
+const LEGACY_FML_IGNORE_PATCHES: &str = "-Dfml.ignorePatchDiscrepancies=true";
+
 /// How long to wait before deleting the `@argfile`. The JVM reads it while
 /// starting up, so it can't be removed immediately after spawn.
 const ARGFILE_CLEANUP_DELAY: Duration = Duration::from_secs(10);
@@ -177,6 +184,8 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
         for jvm_arg in [
             "-Djava.library.path=${natives_directory}",
             "-Djna.library.path=${natives_directory}",
+            LEGACY_FML_IGNORE_CERTIFICATES,
+            LEGACY_FML_IGNORE_PATCHES,
             "-cp",
             "${classpath}",
             "${mainClass}",
@@ -415,6 +424,9 @@ mod tests {
         let jna = args.iter().position(|arg| arg.starts_with("-Djna.library.path=")).unwrap();
         let main = args.iter().position(|arg| arg == &config.main_class).unwrap();
         assert!(jna < main);
+        for flag in [LEGACY_FML_IGNORE_CERTIFICATES, LEGACY_FML_IGNORE_PATCHES] {
+            assert!(args.iter().position(|arg| arg == flag).is_some_and(|index| index < main));
+        }
         assert_eq!(args[jna], format!("-Djna.library.path={}", path_str(&instance.join("natives").canonicalize().unwrap())));
         assert_eq!(std::fs::read(instance.join("natives/libfliteWrapper.so")).unwrap(), b"native library fixture");
     }

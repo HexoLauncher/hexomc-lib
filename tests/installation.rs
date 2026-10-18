@@ -239,12 +239,37 @@ async fn verify_installation(
     Ok(config)
 }
 
-async fn visible_minecraft_window() -> bool {
+/// SDL3 needs PID matching; LWJGL2 windows may only expose the legacy title.
+async fn visible_minecraft_window(pid: u32) -> bool {
     tokio::process::Command::new("xdotool")
-        .args(["search", "--onlyvisible", "--name", "^Minecraft"])
+        .args(["search", "--onlyvisible", "--any", "--pid", &pid.to_string(), "--name", "^Minecraft"])
         .output()
         .await
         .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
+async fn save_window_diagnostics(path: &Path, pid: u32) {
+    let pid = pid.to_string();
+    let mut log = String::new();
+    for (command, args) in [
+        ("xwininfo", vec!["-root", "-tree"]),
+        ("xdotool", vec!["search", "--onlyvisible", "--pid", &pid]),
+    ] {
+        log.push_str(&format!("{command} {}\n", args.join(" ")));
+        let mut child = tokio::process::Command::new(command);
+        child.args(args).kill_on_drop(true);
+        match timeout(Duration::from_secs(5), child.output()).await {
+            Ok(Ok(output)) => {
+                log.push_str(&format!("status: {}\n", output.status));
+                log.push_str(&String::from_utf8_lossy(&output.stdout));
+                log.push_str(&String::from_utf8_lossy(&output.stderr));
+            }
+            Ok(Err(error)) => log.push_str(&format!("{error}\n")),
+            Err(_) => log.push_str("Diagnostic command timed out\n"),
+        }
+    }
+    eprintln!("{log}");
+    let _ = tokio::fs::write(path, log).await;
 }
 
 async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf) -> TestResult {
@@ -265,6 +290,7 @@ async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf)
         .jvm_extra_args
         .push("-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true".into());
     let mut process = RunningGame(launch_with_output(&options, root, sink).await?);
+    let pid = process.0.id().ok_or("Minecraft process has no PID")?;
     let result = timeout(Duration::from_secs(180), async {
         let mut visible_since = None;
         loop {
@@ -274,7 +300,7 @@ async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf)
             if let Some(status) = process.0.try_wait()? {
                 return Err(format!("Minecraft exited before startup completed: {status}").into());
             }
-            if visible_minecraft_window().await {
+            if visible_minecraft_window(pid).await {
                 let since = visible_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= Duration::from_secs(30) {
                     return Ok::<(), Box<dyn Error + Send + Sync>>(());
@@ -286,6 +312,11 @@ async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf)
         }
     })
     .await;
+    if !matches!(&result, Ok(Ok(()))) {
+        save_window_diagnostics(
+            &diagnostics.join(format!("{instance}-{stage}-windows.log")), pid,
+        ).await;
+    }
     let kill_result = process.0.kill().await;
     let wait_result = process.0.wait().await;
     result.map_err(|_| "Minecraft did not display a stable window within 180 seconds")??;

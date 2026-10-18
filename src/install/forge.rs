@@ -6,7 +6,7 @@ use std::{
 use tokio::fs;
 
 use crate::{
-    download::{download_batch, download_file, DownloadTask},
+    download::{download_batch, download_file, verify_sha1, DownloadTask},
     error::{HexoError, Result},
     install::vanilla::{native_key_for_platform, InstanceConfig, LibEntry, LoaderType, NativeEntry},
     version::manifest::{check_library_rule, Rule},
@@ -61,10 +61,13 @@ pub struct ForgeVersionJson {
     #[serde(rename = "mainClass")]
     pub main_class: String,
     pub libraries: Vec<ForgeLibrary>,
+    #[serde(default)]
     pub arguments: ForgeVersionArgs,
+    #[serde(rename = "minecraftArguments")]
+    pub minecraft_arguments: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct ForgeVersionArgs {
     pub jvm: Option<Vec<String>>,
     pub game: Option<Vec<String>>,
@@ -160,7 +163,7 @@ pub async fn install_forge(
 
 
 pub async fn install_forge_like(
-    mc_version: &str,
+    _mc_version: &str,
     loader_version: &str,
     installer_url: &str,
     instance_name: &str,
@@ -187,89 +190,131 @@ pub async fn install_forge_like(
         return result;
     }
     let install_profile: ForgeInstallProfile = serde_json::from_value(profile_value)?;
-
-    let mut lib_tasks: Vec<DownloadTask> = Vec::new();
-    for lib in &install_profile.libraries {
-        let art = &lib.downloads.artifact;
-        if art.url.is_empty() {
-            continue;
-        }
-        let path = lib_dir.join(&art.path);
-        lib_tasks.push(DownloadTask::new(&art.url, &path).with_sha1(art.sha1.clone()));
-    }
-    download_batch(lib_tasks, 8, |_, _| {}).await?;
-
-    let lzma_path = temp_dir.join("client.lzma");
-    extract_file_from_zip(&installer_path, "data/client.lzma", &lzma_path).await?;
-
-    let mc_jar = instance_dir.join(format!("{}.jar", mc_version));
-    run_processors(
-        &install_profile.processors,
-        &install_profile.data,
+    let result = install_forge_modern(
         &installer_path,
-        &lzma_path,
-        &mc_jar,
+        &install_profile,
+        &instance_dir,
         &lib_dir,
         java_path,
         &temp_dir,
+        loader_type,
     )
-    .await?;
+    .await;
+    let _ = fs::remove_dir_all(&temp_dir).await;
+    result
+}
+
+async fn install_forge_modern(
+    installer_path: &Path,
+    install_profile: &ForgeInstallProfile,
+    instance_dir: &Path,
+    lib_dir: &Path,
+    java_path: &Path,
+    temp_dir: &Path,
+    loader_type: LoaderType,
+) -> Result<()> {
+    let mut config = InstanceConfig::load(instance_dir).await?;
+    prepare_forge_libraries(installer_path, &install_profile.libraries, lib_dir, false).await?;
+
+    if install_profile.processors.iter().any(|processor| {
+        processor.sides.as_ref().is_none_or(|sides| sides.iter().any(|side| side == "client"))
+    }) {
+        let lzma_path = temp_dir.join("client.lzma");
+        extract_file_from_zip(installer_path, "data/client.lzma", &lzma_path).await?;
+        let mc_jar = instance_dir.join(format!("{}.jar", config.version_id));
+        run_processors(
+            &install_profile.processors,
+            &install_profile.data,
+            installer_path,
+            &lzma_path,
+            &mc_jar,
+            lib_dir,
+            java_path,
+            temp_dir,
+        )
+        .await?;
+    }
 
     let version_json: ForgeVersionJson =
-        read_json_from_zip(&installer_path, "version.json").await?;
+        read_json_from_zip(installer_path, "version.json").await?;
 
-    let mut new_lib_entries: Vec<LibEntry> = Vec::new();
-    let mut ver_lib_tasks: Vec<DownloadTask> = Vec::new();
-    for lib in &version_json.libraries {
-        let art = &lib.downloads.artifact;
-        if art.url.is_empty() {
-            continue;
-        }
-        let path = lib_dir.join(&art.path);
-        ver_lib_tasks.push(DownloadTask::new(&art.url, &path).with_sha1(art.sha1.clone()));
-        new_lib_entries.push(LibEntry {
-            name: lib.name.clone(),
-            path: path.clone(),
-            sha1: art.sha1.clone(),
-        });
+    let mut new_lib_entries =
+        prepare_forge_libraries(installer_path, &version_json.libraries, lib_dir, true).await?;
+
+    if let Some(arguments) = &version_json.minecraft_arguments {
+        config.start_args = arguments.split_whitespace().map(str::to_owned).collect();
+    } else {
+        merge_forge_arguments(&mut config.start_args, &version_json.arguments);
     }
-    download_batch(ver_lib_tasks, 8, |_, _| {}).await?;
+    config.main_class = version_json.main_class;
+    config.loader_type = loader_type;
+    new_lib_entries.append(&mut config.lib_list);
+    config.lib_list = new_lib_entries;
+    config.save(instance_dir).await
+}
 
-    let mut config = InstanceConfig::load(&instance_dir).await?;
-
-    // Insert Forge JVM args at the -cp position.
-    if let Some(jvm_args) = &version_json.arguments.jvm {
-        let cp_pos = config
-            .start_args
+fn merge_forge_arguments(start_args: &mut Vec<String>, arguments: &ForgeVersionArgs) {
+    if let Some(jvm_args) = &arguments.jvm {
+        let cp_pos = start_args
             .iter()
             .position(|a| a == "-cp")
             .unwrap_or(0);
         for (i, arg) in jvm_args.iter().enumerate() {
-            config.start_args.insert(cp_pos + i, arg.clone());
+            start_args.insert(cp_pos + i, arg.clone());
         }
     }
 
-    // Insert Forge game args right after the main class.
-    if let Some(game_args) = &version_json.arguments.game {
-        if let Some(mc_pos) = config.start_args.iter().position(|a| a == "${mainClass}") {
+    if let Some(game_args) = &arguments.game {
+        if let Some(mc_pos) = start_args.iter().position(|a| a == "${mainClass}") {
             for (i, arg) in game_args.iter().enumerate() {
-                config.start_args.insert(mc_pos + 1 + i, arg.clone());
+                start_args.insert(mc_pos + 1 + i, arg.clone());
             }
         }
     }
+}
 
-    config.main_class = version_json.main_class.clone();
-    config.loader_type = loader_type;
-
-    // Prepend the new libs so Forge takes precedence over vanilla.
-    new_lib_entries.append(&mut config.lib_list);
-    config.lib_list = new_lib_entries;
-
-    config.save(&instance_dir).await?;
-
-    fs::remove_dir_all(&temp_dir).await?;
-
-    Ok(())
+/// Empty URLs identify embedded or processor-generated artifacts, not optional libraries.
+async fn prepare_forge_libraries(
+    installer_path: &Path,
+    libraries: &[ForgeLibrary],
+    lib_dir: &Path,
+    require_files: bool,
+) -> Result<Vec<LibEntry>> {
+    let mut tasks = Vec::new();
+    let mut entries = Vec::new();
+    for library in libraries {
+        let artifact = &library.downloads.artifact;
+        let path = lib_dir.join(&artifact.path);
+        if artifact.url.is_empty() {
+            let embedded_name = format!("maven/{}", artifact.path);
+            let extracted = extract_optional_file_from_zip(installer_path, &embedded_name, &path).await?;
+            if !extracted && !require_files {
+                continue;
+            }
+            if !extracted && !path.is_file() {
+                return Err(HexoError::Other(format!(
+                    "Forge library {} is missing: neither embedded entry {} in {} nor generated file {} exists",
+                    library.name, embedded_name, installer_path.display(), path.display(),
+                )));
+            }
+            if !artifact.sha1.is_empty() && !verify_sha1(&path, &artifact.sha1).await {
+                return Err(HexoError::ChecksumMismatch { path: path.display().to_string() });
+            }
+        } else {
+            let mut task = DownloadTask::new(&artifact.url, &path);
+            if !artifact.sha1.is_empty() {
+                task = task.with_sha1(&artifact.sha1);
+            }
+            tasks.push(task);
+        }
+        entries.push(LibEntry {
+            name: library.name.clone(),
+            path,
+            sha1: artifact.sha1.clone(),
+        });
+    }
+    download_batch(tasks, 8, |_, _| {}).await?;
+    Ok(entries)
 }
 
 /// Legacy Forge install (pre-1.13): no processors. Extract the universal jar,
@@ -475,16 +520,36 @@ async fn extract_file_from_zip(
     entry_name: &str,
     out_path: &Path,
 ) -> Result<()> {
+    if !extract_optional_file_from_zip(zip_path, entry_name, out_path).await? {
+        return Err(HexoError::Other(format!(
+            "Missing ZIP entry {entry_name} in {}", zip_path.display(),
+        )));
+    }
+    Ok(())
+}
+
+async fn extract_optional_file_from_zip(
+    zip_path: &Path,
+    entry_name: &str,
+    out_path: &Path,
+) -> Result<bool> {
     let zip_path = zip_path.to_owned();
     let entry_name = entry_name.to_owned();
     let out_path = out_path.to_owned();
     tokio::task::spawn_blocking(move || {
         let file = std::fs::File::open(&zip_path)?;
         let mut archive = zip::ZipArchive::new(file)?;
-        let mut entry = archive.by_name(&entry_name)?;
+        let mut entry = match archive.by_name(&entry_name) {
+            Ok(entry) => entry,
+            Err(zip::result::ZipError::FileNotFound) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut out = std::fs::File::create(&out_path)?;
         std::io::copy(&mut entry, &mut out)?;
-        Ok(())
+        Ok(true)
     })
     .await
     .map_err(|e| HexoError::Other(e.to_string()))?
@@ -581,6 +646,158 @@ fn classpath_separator() -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
+
+    async fn base_config(directory: &Path) {
+        fs::create_dir_all(directory).await.unwrap();
+        InstanceConfig {
+            version_id: "1.12.2".into(),
+            loader_type: LoaderType::Vanilla,
+            main_class: "net.minecraft.client.main.Main".into(),
+            start_args: vec!["--vanilla-only".into()],
+            lib_list: vec![LibEntry {
+                name: "test:vanilla:1".into(),
+                path: directory.join("vanilla.jar"),
+                sha1: String::new(),
+            }],
+            natives: vec![],
+            assets_id: "1.12".into(),
+            java_version: 8,
+        }.save(directory).await.unwrap();
+    }
+
+    fn write_installer(path: &Path, entries: &[(&str, &[u8])]) {
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, content) in entries {
+            archive.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            archive.write_all(content).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    fn embedded_library() -> ForgeLibrary {
+        serde_json::from_value(json!({
+            "name": "test:forge:1",
+            "downloads": {"artifact": {
+                "path": "test/forge/1/forge-1.jar",
+                "url": "",
+                "sha1": "a9993e364706816aba3e25717850c26c9cd0d89d"
+            }}
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn modern_installer_without_processors_supports_embedded_legacy_forge() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = root.path().join("installer.jar");
+        let instance = root.path().join("instance");
+        let libraries = root.path().join("libraries");
+        base_config(&instance).await;
+        let library = embedded_library();
+        let version = serde_json::to_vec(&json!({
+            "mainClass": "net.minecraft.launchwrapper.Launch",
+            "minecraftArguments": "--username ${auth_player_name} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker",
+            "libraries": [library],
+        })).unwrap();
+        write_installer(&installer, &[
+            ("version.json", &version),
+            ("maven/test/forge/1/forge-1.jar", b"abc"),
+        ]);
+        let profile = ForgeInstallProfile {
+            libraries: vec![library], processors: vec![], data: HashMap::new(),
+        };
+        install_forge_modern(
+            &installer, &profile, &instance, &libraries,
+            Path::new("java-must-not-run"), root.path(), LoaderType::Forge,
+        ).await.unwrap();
+        let config = InstanceConfig::load(&instance).await.unwrap();
+        assert_eq!(config.loader_type, LoaderType::Forge);
+        assert_eq!(config.main_class, "net.minecraft.launchwrapper.Launch");
+        assert_eq!(config.start_args, [
+            "--username", "${auth_player_name}", "--tweakClass",
+            "net.minecraftforge.fml.common.launcher.FMLTweaker",
+        ]);
+        assert_eq!(config.lib_list.len(), 2);
+        assert_eq!(config.lib_list[0].name, "test:forge:1");
+        assert_eq!(fs::read(&config.lib_list[0].path).await.unwrap(), b"abc");
+        assert!(verify_sha1(&config.lib_list[0].path, &config.lib_list[0].sha1).await);
+        assert_eq!(config.lib_list[1].name, "test:vanilla:1");
+        assert_eq!(config.assets_id, "1.12");
+    }
+
+    #[tokio::test]
+    async fn generated_libraries_must_exist_after_processors_and_remain_on_classpath() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = root.path().join("installer.jar");
+        write_installer(&installer, &[]);
+        let libraries = vec![embedded_library()];
+        let before = prepare_forge_libraries(&installer, &libraries, root.path(), false).await.unwrap();
+        assert!(before.is_empty());
+        let error = prepare_forge_libraries(&installer, &libraries, root.path(), true).await.unwrap_err();
+        assert!(error.to_string().contains("test:forge:1"));
+        assert!(error.to_string().contains("maven/test/forge/1/forge-1.jar"));
+        let generated = root.path().join(&libraries[0].downloads.artifact.path);
+        fs::create_dir_all(generated.parent().unwrap()).await.unwrap();
+        fs::write(&generated, b"abc").await.unwrap();
+        let after = prepare_forge_libraries(&installer, &libraries, root.path(), true).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].path, generated);
+        fs::write(&generated, b"corrupt").await.unwrap();
+        assert!(prepare_forge_libraries(&installer, &libraries, root.path(), false).await.unwrap().is_empty());
+        assert!(matches!(
+            prepare_forge_libraries(&installer, &libraries, root.path(), true).await,
+            Err(HexoError::ChecksumMismatch { .. }),
+        ));
+    }
+
+    #[tokio::test]
+    async fn embedded_library_checksums_are_verified() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = root.path().join("installer.jar");
+        write_installer(&installer, &[("maven/test/forge/1/forge-1.jar", b"corrupt")]);
+        assert!(matches!(
+            prepare_forge_libraries(&installer, &[embedded_library()], root.path(), true).await,
+            Err(HexoError::ChecksumMismatch { .. }),
+        ));
+    }
+
+    #[test]
+    fn modern_forge_arguments_keep_jvm_and_game_arguments_in_their_sections() {
+        let version: ForgeVersionJson = serde_json::from_value(json!({
+            "mainClass": "forge.Main", "libraries": [],
+            "arguments": {"jvm": ["-Dforge=true"], "game": ["--launchTarget", "forgeclient"]},
+        })).unwrap();
+        let mut args = ["-cp", "${classpath}", "${mainClass}", "--username", "${auth_player_name}"]
+            .map(str::to_owned).to_vec();
+        merge_forge_arguments(&mut args, &version.arguments);
+        assert_eq!(args, [
+            "-Dforge=true", "-cp", "${classpath}", "${mainClass}",
+            "--launchTarget", "forgeclient", "--username", "${auth_player_name}",
+        ]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network"]
+    async fn forge_1_12_2_2864_installs_embedded_jar_and_legacy_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let instance = root.path().join("instance/test");
+        base_config(&instance).await;
+        install_forge_like(
+            "1.12.2", "1.12.2-14.23.5.2864",
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/1.12.2-14.23.5.2864/forge-1.12.2-14.23.5.2864-installer.jar",
+            "test", Path::new("java-must-not-run"), root.path(), LoaderType::Forge,
+        ).await.unwrap();
+        let config = InstanceConfig::load(&instance).await.unwrap();
+        assert_eq!(config.main_class, "net.minecraft.launchwrapper.Launch");
+        assert_eq!(config.loader_type, LoaderType::Forge);
+        assert!(config.start_args.iter().any(|arg| arg == "net.minecraftforge.fml.common.launcher.FMLTweaker"));
+        for library in config.lib_list.iter().filter(|library| library.name != "test:vanilla:1") {
+            assert!(verify_sha1(&library.path, &library.sha1).await, "{}", library.name);
+        }
+        let forge = config.lib_list.iter().find(|lib| lib.name == "net.minecraftforge:forge:1.12.2-14.23.5.2864").unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&forge.path).unwrap()).unwrap();
+        assert!(archive.by_name("net/minecraftforge/fml/common/launcher/FMLTweaker.class").is_ok());
+    }
 
     fn legacy_profile(libraries: serde_json::Value) -> LegacyInstallProfile {
         serde_json::from_value(json!({
