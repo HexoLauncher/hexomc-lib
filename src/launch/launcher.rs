@@ -234,11 +234,13 @@ fn extract_natives(config: &InstanceConfig, natives_dir: &Path) -> Result<()> {
 
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).map_err(|e| HexoError::Other(e.to_string()))?;
-            let name = entry.name().to_string();
-            if name.starts_with("META-INF") || name.ends_with('/') {
+            let Some(relative) = entry.enclosed_name() else {
+                continue;
+            };
+            if relative.starts_with("META-INF") || entry.is_dir() {
                 continue;
             }
-            let out_path = natives_dir.join(&name);
+            let out_path = natives_dir.join(relative);
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }

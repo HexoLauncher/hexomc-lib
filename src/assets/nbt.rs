@@ -33,6 +33,16 @@ impl Nbt {
         }
     }
 
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Nbt::Byte(v) => Some(*v as i64),
+            Nbt::Short(v) => Some(*v as i64),
+            Nbt::Int(v) => Some(*v as i64),
+            Nbt::Long(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     pub fn as_list(&self) -> Option<&[Nbt]> {
         match self {
             Nbt::List(items) => Some(items),

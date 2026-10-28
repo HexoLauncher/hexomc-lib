@@ -2,7 +2,7 @@
 name = "hexomc-lib"
 description = "A library for launching Minecraft instances."
 license = "MIT"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 
 [dependencies]
@@ -30,6 +30,9 @@ tar = "0.4"
 
 async-trait = "0.1"
 md-5 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
 
 [dev-dependencies]
 tempfile = "3"

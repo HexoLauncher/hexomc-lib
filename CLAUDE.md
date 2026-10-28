@@ -32,7 +32,8 @@ The public surface is re-exported flat from [src/lib.rs](src/lib.rs) — check i
 - **`install`** — one module per loader (`vanilla`, `fabric`, `forge`, `neoforge`) plus `loader.rs`, the DI layer.
 - **`launch`** — assembles classpath, extracts natives, substitutes `${placeholder}` args, writes a Java `@argfile`, and spawns the process.
 - **`modpack`** — modpack installers built on top of `install` (see below).
-- **`java`**, **`auth`**, **`mods`**, **`assets`** — supporting subsystems (Java detect/install, Microsoft Device Code Flow, mod detection + Modrinth/CurseForge clients + updater, resource-pack/shader/map detection).
+- **`browse`** — `Browser` searches, lists versions, reads details and resolves download files for mods/resource packs/shaders/modpacks on Modrinth and CurseForge (API key via `with_curseforge_key`), plus ATLauncher/FTB modpacks from a locally searched catalog cached for 30 minutes. Output types serialize as camelCase.
+- **`java`**, **`auth`**, **`mods`**, **`assets`** — supporting subsystems (Java detect/install — `java::scan::scan_java` probes every known install location and `find_java` is its synchronous shortcut —, Microsoft Device Code Flow, mod detection + Modrinth/CurseForge clients + updater + `mods::resolve` dependency resolution and local-mod matching, resource-pack/shader/map detection).
 
 ### The install pipeline (most important to understand)
 

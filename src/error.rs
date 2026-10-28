@@ -38,6 +38,25 @@ pub enum HexoError {
     #[error("Forge processor failed: {0}")]
     ProcessorFailed(String),
 
+    #[error("unsupported platform: {0}")]
+    UnsupportedPlatform(String),
+
+    #[error("invalid project or version ID: {0:?}")]
+    InvalidId(String),
+
+    #[error("CurseForge API key is not set")]
+    MissingApiKey,
+
+    #[error("the author of {project} disallows third-party downloads")]
+    DownloadBlocked {
+        project: String,
+        /// Page the file can be downloaded from manually.
+        website: Option<String>,
+    },
+
+    #[error("dependency resolution failed: {0}")]
+    Dependency(String),
+
     #[error("error: {0}")]
     Other(String),
 }

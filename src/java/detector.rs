@@ -1,113 +1,33 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::scan::java_search_paths;
+
 #[derive(Debug, Clone)]
 pub struct JavaInfo {
     pub path: PathBuf,
     pub version: u32,
 }
 
+/// Find a Java runtime for `required_version`: the exact major version if installed,
+/// otherwise the nearest newer one. Searches the same locations as
+/// [`super::scan::scan_java`], but synchronously and without a launcher root.
 pub fn find_java(required_version: u32) -> Option<JavaInfo> {
-    let candidates = collect_java_candidates();
-
-    for path in &candidates {
-        if let Some(info) = probe_java(path) {
-            if info.version == required_version {
-                return Some(info);
-            }
-        }
-    }
-
-    let mut best: Option<JavaInfo> = None;
-    for path in &candidates {
-        if let Some(info) = probe_java(path) {
-            if info.version >= required_version
-                && best.as_ref().is_none_or(|b| info.version < b.version) {
-                    best = Some(info);
-                }
-        }
-    }
-    best
-}
-
-/// All candidate java executable paths (existence not checked).
-fn collect_java_candidates() -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    if let Ok(java_home) = std::env::var("JAVA_HOME") {
-        candidates.push(PathBuf::from(&java_home).join("bin").join(java_exe()));
-    }
-
-    if let Ok(path) = which::which("java") {
-        candidates.push(path);
-    }
-
-    candidates.extend(scan_well_known_dirs());
-
-    candidates
-}
-
-fn scan_well_known_dirs() -> Vec<PathBuf> {
-    let mut found = Vec::new();
-
-    #[cfg(target_os = "windows")]
-    {
-        let roots = [
-            r"C:\Program Files\Java",
-            r"C:\Program Files\Eclipse Adoptium",
-            r"C:\Program Files\Microsoft",
-            r"C:\Program Files\Zulu",
-        ];
-        for root in &roots {
-            found.extend(scan_dir_for_java(Path::new(root)));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let root = Path::new("/Library/Java/JavaVirtualMachines");
-        if root.exists() {
-            if let Ok(entries) = std::fs::read_dir(root) {
-                for e in entries.flatten() {
-                    let java = e
-                        .path()
-                        .join("Contents")
-                        .join("Home")
-                        .join("bin")
-                        .join("java");
-                    if java.exists() {
-                        found.push(java);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let roots = ["/usr/lib/jvm", "/usr/local/lib/jvm"];
-        for root in &roots {
-            found.extend(scan_dir_for_java(Path::new(root)));
-        }
-    }
+    let found: Vec<JavaInfo> = java_search_paths(None)
+        .iter()
+        .filter_map(|path| probe_java(path))
+        .collect();
 
     found
-}
-
-fn scan_dir_for_java(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    if !root.exists() {
-        return found;
-    }
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for e in entries.flatten() {
-            let java = e.path().join("bin").join(java_exe());
-            if java.exists() {
-                found.push(java);
-            }
-        }
-    }
-    found
+        .iter()
+        .find(|info| info.version == required_version)
+        .or_else(|| {
+            found
+                .iter()
+                .filter(|info| info.version > required_version)
+                .min_by_key(|info| info.version)
+        })
+        .cloned()
 }
 
 pub fn probe_java(path: &Path) -> Option<JavaInfo> {
@@ -140,14 +60,6 @@ fn parse_java_version(output: &str) -> Option<u32> {
         }
     }
     None
-}
-
-fn java_exe() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "java.exe"
-    } else {
-        "java"
-    }
 }
 
 #[cfg(test)]

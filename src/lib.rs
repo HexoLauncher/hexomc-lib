@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod auth;
+pub mod browse;
 pub mod download;
 pub mod error;
 pub mod install;
@@ -29,7 +30,10 @@ pub use install::loader::{
     create_loader, install_with_loader,
 };
 
-pub use java::detector::{find_java, JavaInfo};
+pub use java::detector::{find_java, probe_java, JavaInfo};
+pub use java::scan::{
+    java_search_paths, pick_java, probe_java_runtime, scan_java, JavaRuntime,
+};
 pub use java::installer::{download_java, download_java_with_progress};
 
 pub use launch::launcher::{launch, launch_with_channel, launch_with_output, LaunchOptions};
@@ -46,6 +50,16 @@ pub use mods::detector::{
 pub use mods::curseforge::CurseForgeClient;
 pub use mods::modrinth::{ModrinthClient, MrProject, MrVersion};
 pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
+pub use mods::resolve::{
+    is_compatible, match_local, resolve_graph_with, scan_local_mods, sha256_file,
+    DependencyRelation, LocalMatch, LocalMod, RemoteDependency, ResolvedMod,
+};
+
+pub use browse::{
+    Browser, DescriptionFormat, GalleryImage, Platform, ProjectDetail, ProjectKind,
+    ProjectLink, ProjectVersion, ReleaseType, RemoteFile, SearchHit, SearchPage, SearchQuery,
+    SortBy, VersionFilter,
+};
 
 pub use modpack::{
     detect_modpack_format, install_modpack, install_modpack_files, resolve_forge_version,
@@ -65,6 +79,6 @@ pub use modpack::atpack::{
 };
 
 pub use assets::detector::{
-    detect_resource_packs, detect_shader_packs, detect_maps,
-    ResourcePack, ShaderPack, WorldMap,
+    detect_resource_packs, detect_shader_packs, detect_maps, detect_servers, dir_size,
+    read_world, GameMode, ResourcePack, ServerEntry, ShaderPack, WorldMap,
 };
