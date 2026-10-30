@@ -255,9 +255,11 @@ fn extract_natives(config: &InstanceConfig, natives_dir: &Path) -> Result<()> {
 fn build_classpath(config: &InstanceConfig, instance_dir: &Path) -> String {
     let sep = classpath_sep();
     let mut seen = std::collections::HashSet::new();
+    let mut artifacts = std::collections::HashSet::new();
     let mut parts: Vec<String> = config
         .lib_list
         .iter()
+        .filter(|lib| library_key(&lib.name).is_none_or(|key| artifacts.insert(key)))
         .filter_map(|lib| {
             // Make relative paths absolute; once Java's cwd is .minecraft/ a relative
             // path would break.
@@ -275,6 +277,21 @@ fn build_classpath(config: &InstanceConfig, instance_dir: &Path) -> String {
     parts.push(path_str(&client_jar_path));
 
     parts.join(sep)
+}
+
+/// Identifies a library by `group:artifact[:classifier]`, ignoring its version.
+///
+/// Loader libraries are listed before the vanilla ones, so keeping only the first
+/// entry per key lets the loader's version win (e.g. Fabric's ASM over Mojang's).
+fn library_key(name: &str) -> Option<String> {
+    let name = name.split('@').next().unwrap_or(name);
+    let parts: Vec<&str> = name.split(':').collect();
+    if parts.len() < 3 || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    let mut key = vec![parts[0], parts[1]];
+    key.extend(&parts[3..]);
+    Some(key.join(":"))
 }
 
 fn build_argdata(
@@ -462,6 +479,35 @@ mod tests {
         std::fs::remove_dir(&assets).unwrap();
         let data = build_argdata(&options, root.path(), &instance, &config, "classpath");
         assert_eq!(data["game_assets"], path_str(&root.path().join("assets")));
+    }
+
+    #[test]
+    fn classpath_keeps_first_version_of_each_library() {
+        let lib = |name: &str, path: &str| crate::install::LibEntry {
+            name: name.into(),
+            path: PathBuf::from(path),
+            sha1: String::new(),
+        };
+        let config = InstanceConfig {
+            version_id: "1.21.8".into(),
+            loader_type: crate::install::LoaderType::Fabric,
+            main_class: "net.fabricmc.loader.impl.launch.knot.KnotClient".into(),
+            start_args: vec![],
+            lib_list: vec![
+                lib("org.ow2.asm:asm:9.8", "/libs/asm-9.8.jar"),
+                lib("org.lwjgl:lwjgl:3.3.3", "/libs/lwjgl-3.3.3.jar"),
+                lib("org.lwjgl:lwjgl:3.3.3:natives-windows", "/libs/lwjgl-3.3.3-natives-windows.jar"),
+                lib("org.ow2.asm:asm:9.6", "/libs/asm-9.6.jar"),
+            ],
+            natives: vec![],
+            assets_id: "26".into(),
+            java_version: 21,
+        };
+        let classpath = build_classpath(&config, Path::new("/instance"));
+        assert!(classpath.contains("asm-9.8.jar"));
+        assert!(!classpath.contains("asm-9.6.jar"));
+        assert!(classpath.contains("lwjgl-3.3.3.jar"));
+        assert!(classpath.contains("lwjgl-3.3.3-natives-windows.jar"));
     }
 
     fn make_data() -> HashMap<String, String> {

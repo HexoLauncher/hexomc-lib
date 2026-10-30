@@ -1,5 +1,5 @@
-//! Modpack installation: Modrinth (`.mrpack`), CurseForge (`manifest.json` zip) and
-//! ATLauncher and FTB (online packs).
+//! Modpack installation: Modrinth (`.mrpack`), CurseForge (`manifest.json` zip), HMCL
+//! (`modpack.json` or `mcbbs.packmeta` zip) and ATLauncher and FTB (online packs).
 //!
 //! Every format follows the same flow: parse the pack, install vanilla + the loader via
 //! `install_with_loader`, extract overrides/configs into `instance/{name}/.minecraft`,
@@ -10,6 +10,7 @@
 pub mod atpack;
 pub mod cfpack;
 pub mod ftbpack;
+pub mod hmclpack;
 pub mod mrpack;
 
 use std::{
@@ -68,6 +69,10 @@ impl ModpackInfo {
 pub enum ModpackFormat {
     Modrinth,
     CurseForge,
+    /// HMCL's own format (`modpack.json` + `minecraft/`).
+    Hmcl,
+    /// MCBBS format exported by HMCL (`mcbbs.packmeta` + `overrides/`).
+    Mcbbs,
 }
 
 /// A file that could not be downloaded automatically (CurseForge files whose authors
@@ -106,14 +111,33 @@ struct ModpackState {
 const MODPACK_STATE_FILE: &str = "modpack_state.json";
 
 /// Detect a modpack's format from the zip contents.
+///
+/// MCBBS packs usually also ship a CurseForge `manifest.json` for compatibility. When
+/// that manifest lists CurseForge files the pack is treated as CurseForge so the files
+/// get downloaded; otherwise `mcbbs.packmeta` wins.
 pub async fn detect_modpack_format(pack_path: &Path) -> Result<ModpackFormat> {
     let pack_path = pack_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let archive = zip::ZipArchive::new(std::fs::File::open(&pack_path)?)?;
-        if archive.index_for_name(mrpack::INDEX_FILE).is_some() {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&pack_path)?)?;
+        let has = |archive: &zip::ZipArchive<std::fs::File>, name| archive.index_for_name(name).is_some();
+        let has_cf = has(&archive, cfpack::MANIFEST_FILE);
+        if has(&archive, mrpack::INDEX_FILE) {
             Ok(ModpackFormat::Modrinth)
-        } else if archive.index_for_name(cfpack::MANIFEST_FILE).is_some() {
+        } else if has(&archive, hmclpack::MCBBS_MANIFEST_FILE) {
+            let cf_has_files = has_cf
+                && serde_json::from_reader::<_, cfpack::CfManifest>(
+                    archive.by_name(cfpack::MANIFEST_FILE)?,
+                )
+                .is_ok_and(|manifest| !manifest.files.is_empty());
+            Ok(if cf_has_files {
+                ModpackFormat::CurseForge
+            } else {
+                ModpackFormat::Mcbbs
+            })
+        } else if has_cf {
             Ok(ModpackFormat::CurseForge)
+        } else if has(&archive, hmclpack::HMCL_MANIFEST_FILE) {
+            Ok(ModpackFormat::Hmcl)
         } else {
             Err(HexoError::Other(format!(
                 "unrecognized modpack format: {}",
@@ -170,10 +194,18 @@ async fn install_modpack_inner(
             })?;
             cfpack::install_cfpack(pack_path, instance_name, base_dir, java_path, cf, progress).await
         }
+        ModpackFormat::Hmcl => {
+            hmclpack::install_hmcl_pack(pack_path, instance_name, base_dir, java_path, progress)
+                .await
+        }
+        ModpackFormat::Mcbbs => {
+            hmclpack::install_mcbbs_pack(pack_path, instance_name, base_dir, java_path, progress)
+                .await
+        }
     }
 }
 
-/// Install or change a local Modrinth/CurseForge modpack version in-place.
+/// Install or change a local modpack version in-place.
 ///
 /// Minecraft and its loader are reinstalled when the new pack requests different
 /// versions. Files recorded from an earlier call are removed when the new manifest
@@ -235,6 +267,12 @@ pub async fn install_modpack_files(
             })?;
             cfpack::install_cfpack_files(pack_path, instance_name, base_dir, cf, progress).await
         }
+        ModpackFormat::Hmcl => {
+            hmclpack::install_hmcl_pack_files(pack_path, instance_name, base_dir, progress).await
+        }
+        ModpackFormat::Mcbbs => {
+            hmclpack::install_mcbbs_pack_files(pack_path, instance_name, base_dir, progress).await
+        }
     }?;
     let managed_files = managed_files_for_local(pack_path, curseforge).await?;
     save_modpack_state(instance_name, base_dir, managed_files).await?;
@@ -286,6 +324,7 @@ async fn managed_files_for_local(
                 })
                 .collect::<Result<_>>()
         }
+        ModpackFormat::Hmcl | ModpackFormat::Mcbbs => Ok(BTreeSet::new()),
     }
 }
 
@@ -443,9 +482,20 @@ pub(crate) fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
 /// Extract every file under `prefix/` in the zip into `dest`, stripping the prefix.
 /// An empty `prefix` extracts everything. Returns the number of files written.
 pub(crate) async fn extract_zip_dir(zip_path: &Path, prefix: &str, dest: &Path) -> Result<usize> {
+    extract_zip_dir_filtered(zip_path, prefix, dest, &[]).await
+}
+
+/// Like [`extract_zip_dir`], but skips the files whose path relative to `prefix` is in `skip`.
+pub(crate) async fn extract_zip_dir_filtered(
+    zip_path: &Path,
+    prefix: &str,
+    dest: &Path,
+    skip: &[&str],
+) -> Result<usize> {
     let zip_path = zip_path.to_path_buf();
     let dest = dest.to_path_buf();
     let prefix = prefix.trim_matches('/').to_string();
+    let skip: Vec<PathBuf> = skip.iter().map(PathBuf::from).collect();
 
     tokio::task::spawn_blocking(move || -> Result<usize> {
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path)?)?;
@@ -461,7 +511,7 @@ pub(crate) async fn extract_zip_dir(zip_path: &Path, prefix: &str, dest: &Path) 
                     Err(_) => continue,
                 }
             };
-            if rel.as_os_str().is_empty() {
+            if rel.as_os_str().is_empty() || skip.contains(&rel) {
                 continue;
             }
             let out = dest.join(&rel);

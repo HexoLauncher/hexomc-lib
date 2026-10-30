@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`hexomc-lib` is a Rust library (not a binary) providing the core of a Minecraft launcher: version manifest queries, vanilla/Fabric/Forge/NeoForge installation, game launching, Java detection/download, Microsoft authentication (Device Code Flow), mod detection + Modrinth/CurseForge lookup + auto-update, modpack installation (Modrinth `.mrpack`, CurseForge, ATLauncher, FTB), and resource-pack/shader/map detection.
+`hexomc-lib` is a Rust library (not a binary) providing the core of a Minecraft launcher: version manifest queries, vanilla/Fabric/Forge/NeoForge installation, game launching, Java detection/download, Microsoft authentication (Device Code Flow), mod detection + Modrinth/CurseForge lookup + auto-update, modpack installation (Modrinth `.mrpack`, CurseForge, HMCL/MCBBS, ATLauncher, FTB), and resource-pack/shader/map detection.
 
 Write only English doc comments (`///`, `//!`) — no inline `//` comments and no Chinese in new code, including error and progress strings. All Rust sources (`src/`, `examples/`, `tests/`) are English-only; keep them that way. `README.md` is still Chinese by design.
 
@@ -28,7 +28,7 @@ Integration tests (`tests/integration.rs`) are **not** `#[ignore]`d: they hit li
 The public surface is re-exported flat from [src/lib.rs](src/lib.rs) — check it first to see what's stable API vs. internal. Modules:
 
 - **`version`** — fetches and parses Mojang's version manifest and per-version JSON, including library/JVM rule evaluation (`check_library_rule`, `check_jvm_rule`).
-- **`download`** — [src/download/downloader.rs](src/download/downloader.rs) is the shared download engine: `DownloadTask` (with optional SHA1 and SHA-256), `download_file` (retries, skips if all configured checksums match), and `download_batch` (concurrent via `futures::stream`). All installers route through this.
+- **`download`** — [src/download/downloader.rs](src/download/downloader.rs) is the shared download engine: `DownloadTask` (with optional SHA1 and SHA-256), `download_file` (retries, skips if all configured checksums match), and `download_batch` (concurrent via `futures::stream`). All installers route through this. [src/download/mirror.rs](src/download/mirror.rs) holds the process-wide `DownloadSource` (`set_download_source`): with BMCLAPI or a `DownloadSource::custom` mirror (same path layout as BMCLAPI), `download_file` and the metadata fetches (`mirror::get_json` / `get_text`, used by the version manifest, Fabric, Forge and NeoForge) try the mirrored URL first and fall back to the official one. New Mojang/loader fetches should go through those helpers.
 - **`install`** — one module per loader (`vanilla`, `fabric`, `forge`, `neoforge`) plus `loader.rs`, the DI layer.
 - **`launch`** — assembles classpath, extracts natives, substitutes `${placeholder}` args, writes a Java `@argfile`, and spawns the process.
 - **`modpack`** — modpack installers built on top of `install` (see below).
@@ -51,6 +51,7 @@ Use `install_modpack_files`, `install_mrpack_files`, `install_cfpack_files`, `in
 
 - **`mrpack`** — Modrinth `.mrpack` (`modrinth.index.json`, `overrides/` then `client-overrides/`; files with client env `unsupported` are skipped).
 - **`cfpack`** — CurseForge zip (`manifest.json` + overrides). Download URLs come from `CurseForgeClient::get_files`/`get_mods` (API key required); `classId` picks `mods`/`resourcepacks`/`shaderpacks`. Files with a null `downloadUrl` are returned as `ManualDownload`, never fetched via a CDN workaround.
+- **`hmclpack`** — HMCL exports, read entirely from the archive (no downloads). HMCL format: `modpack.json` + `minecraft/pack.json` (version JSON; the loader comes from `patches`, falling back to `libraries` coordinates) and the rest of `minecraft/` as game files. MCBBS format: `mcbbs.packmeta` (`addons` give game/loader) + `overrides/`. `detect_modpack_format` checks `mcbbs.packmeta` before `manifest.json` but still picks CurseForge when that manifest lists files; MCBBS `curse` entries are reported in `skipped`.
 - **`atpack`** — ATLauncher packs have no file format: `Configs.json` / `Configs.zip` are fetched from `download.nodecdn.net/containers/atl/packs/{safeName}/versions/{version}/`, the version list from `api.atlauncher.com/v1/pack/{safeName}`. That API is behind Cloudflare and returns 403 without a User-Agent. Files carry MD5 (checked after download, since `DownloadTask` verifies SHA1 and SHA-256, not MD5).
 - **`ftbpack`** — FTB packs have no file format: metadata and version manifests come from `api.feed-the-beast.com/v1/modpacks/public/modpack/{packId}[/{versionId}]`. Installs client files at manifest paths, optionally including optional files. CurseForge references accept numeric or string IDs and are resolved through the supplied client; missing URLs or a missing client yield manual downloads. Entries without any download source are skipped. Pack names come from pack metadata, not the version manifest.
 
@@ -65,6 +66,8 @@ A launcher root (`base_dir`, e.g. `./mc_data`) contains shared `assets/` and `li
 ### Launch specifics
 
 [src/launch/launcher.rs](src/launch/launcher.rs) canonicalizes `base_dir` and strips the Windows `\\?\` extended-path prefix (Java can't parse it) and normalizes to forward slashes. Args are passed via a written `@argfile` to avoid OS command-length limits. Auth token/UUID/XUID on `LaunchOptions` are optional — absent means offline mode (`LaunchOptions::offline(...)`).
+
+[src/launch/crash.rs](src/launch/crash.rs) is a pure pattern matcher: `analyze_crash(log, crash_report, jvm_report)` returns `CrashCause`s (Java version, memory, graphics driver, missing/incompatible/duplicate mods, Mixin, corrupted files, suspected mods, OpenJ9, native crash); `find_crash_files` picks the newest crash report and `hs_err_pid*.log` written since a given time.
 
 All three entry points share `prepare_command` (builds the java `Command` without spawning): `launch` inherits stdio and returns `std::process::Child`; `launch_with_output` / `launch_with_channel` pipe stdout+stderr and return a `GameProcess` ([src/launch/output.rs](src/launch/output.rs)), which delivers `OutputLine { kind, line }` via an `OutputFn` callback or an unbounded channel. `GameProcess::wait` waits for the process *and* drains the reader tasks, so no line is lost.
 

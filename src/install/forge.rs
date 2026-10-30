@@ -117,9 +117,8 @@ pub struct LegacyLibrary {
 
 /// Available Forge versions for the given MC version.
 pub async fn get_forge_versions(mc_version: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
     let data: HashMap<String, Vec<String>> =
-        client.get(FORGE_META_URL).send().await?.json().await?;
+        crate::download::mirror::get_json(&reqwest::Client::new(), FORGE_META_URL).await?;
 
     Ok(data.get(mc_version).cloned().unwrap_or_default())
 }

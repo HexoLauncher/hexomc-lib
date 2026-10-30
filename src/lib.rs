@@ -18,6 +18,9 @@ pub use version::manifest::{
 };
 
 pub use download::{download_file, download_file_with_progress, download_batch, DownloadTask};
+pub use download::mirror::{
+    candidate_urls, download_source, mirror_url, set_download_source, DownloadSource,
+};
 
 pub use install::vanilla::{install_vanilla, InstanceConfig, LoaderType, LibEntry, NativeEntry};
 pub use install::fabric::{install_fabric, get_fabric_loader_versions};
@@ -37,6 +40,7 @@ pub use java::scan::{
 pub use java::installer::{download_java, download_java_with_progress};
 
 pub use launch::launcher::{launch, launch_with_channel, launch_with_output, LaunchOptions};
+pub use launch::crash::{analyze_crash, find_crash_files, CrashCause, CrashFiles};
 pub use launch::output::{no_output, GameProcess, OutputFn, OutputKind, OutputLine};
 
 pub use auth::microsoft::{
@@ -68,6 +72,10 @@ pub use modpack::{
 };
 pub use modpack::mrpack::{install_mrpack, install_mrpack_files, read_mrpack_index, MrpackIndex};
 pub use modpack::cfpack::{install_cfpack, install_cfpack_files, read_cf_manifest, CfManifest};
+pub use modpack::hmclpack::{
+    install_hmcl_pack, install_hmcl_pack_files, install_mcbbs_pack, install_mcbbs_pack_files,
+    read_hmcl_pack, read_mcbbs_manifest, HmclManifest, HmclPack, HmclVersionJson, McbbsManifest,
+};
 pub use modpack::ftbpack::{
     fetch_ftb_version_manifest, get_ftb_pack, install_ftb_pack, install_ftb_pack_files,
     FtbCurseForgeRef, FtbFile, FtbPack, FtbTarget, FtbVersion, FtbVersionManifest,

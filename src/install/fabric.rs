@@ -43,7 +43,7 @@ pub async fn get_fabric_loader_versions(mc_version: &str) -> Result<Vec<FabricLo
         loader: FabricLoaderVersion,
     }
 
-    let entries: Vec<Entry> = client.get(&url).send().await?.json().await?;
+    let entries: Vec<Entry> = crate::download::mirror::get_json(&client, &url).await?;
     Ok(entries.into_iter().map(|e| e.loader).collect())
 }
 
@@ -52,14 +52,7 @@ async fn fetch_fabric_profile(mc_version: &str, loader_version: &str) -> Result<
         "{}/versions/loader/{}/{}/profile/json",
         FABRIC_META_BASE, mc_version, loader_version
     );
-    let client = reqwest::Client::new();
-    let profile = client
-        .get(&url)
-        .send()
-        .await?
-        .json::<FabricProfileJson>()
-        .await?;
-    Ok(profile)
+    crate::download::mirror::get_json(&reqwest::Client::new(), &url).await
 }
 
 pub async fn install_fabric(
@@ -149,7 +142,5 @@ fn parse_fabric_lib(lib: &FabricLibrary) -> Result<FabricLibParsed> {
 }
 
 async fn fetch_text(url: &str) -> Result<String> {
-    let client = reqwest::Client::new();
-    let text = client.get(url).send().await?.text().await?;
-    Ok(text)
+    crate::download::mirror::get_text(&reqwest::Client::new(), url).await
 }

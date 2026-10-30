@@ -227,36 +227,15 @@ fn current_arch() -> &'static str {
 }
 
 pub async fn fetch_version_manifest() -> Result<VersionManifest> {
-    let client = reqwest::Client::new();
-    let manifest = client
-        .get(VERSION_MANIFEST_URL)
-        .send()
-        .await?
-        .json::<VersionManifest>()
-        .await?;
-    Ok(manifest)
+    crate::download::mirror::get_json(&reqwest::Client::new(), VERSION_MANIFEST_URL).await
 }
 
 pub async fn fetch_version_json(url: &str) -> Result<VersionJson> {
-    let client = reqwest::Client::new();
-    let json = client
-        .get(url)
-        .send()
-        .await?
-        .json::<VersionJson>()
-        .await?;
-    Ok(json)
+    crate::download::mirror::get_json(&reqwest::Client::new(), url).await
 }
 
 pub async fn fetch_asset_index(url: &str) -> Result<AssetIndexData> {
-    let client = reqwest::Client::new();
-    let data = client
-        .get(url)
-        .send()
-        .await?
-        .json::<AssetIndexData>()
-        .await?;
-    Ok(data)
+    crate::download::mirror::get_json(&reqwest::Client::new(), url).await
 }
 
 #[cfg(test)]

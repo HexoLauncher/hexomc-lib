@@ -44,6 +44,9 @@ pub enum HexoError {
     #[error("invalid project or version ID: {0:?}")]
     InvalidId(String),
 
+    #[error("invalid mirror URL: {0:?}")]
+    InvalidMirrorUrl(String),
+
     #[error("CurseForge API key is not set")]
     MissingApiKey,
 

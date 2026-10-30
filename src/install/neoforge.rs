@@ -15,13 +15,8 @@ const NEOFORGE_META_XML: &str =
 ///
 /// NeoForge version format: `{mc_minor}.{patch}` (e.g. MC 1.21.1 -> NeoForge 21.1.x).
 pub async fn get_neoforge_versions(mc_version: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
-    let xml_text = client
-        .get(NEOFORGE_META_XML)
-        .send()
-        .await?
-        .text()
-        .await?;
+    let xml_text =
+        crate::download::mirror::get_text(&reqwest::Client::new(), NEOFORGE_META_XML).await?;
 
     // Derive the NeoForge version prefix from the MC version, e.g. "1.21.1" -> "21.1.".
     let prefix = mc_version_to_neoforge_prefix(mc_version);

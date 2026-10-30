@@ -109,10 +109,12 @@ where
 
     let client = reqwest::Client::new();
     let temp_path = temporary_sibling(&task.path, "download");
+    let urls = super::mirror::candidate_urls(&task.url);
     let mut last_err = None;
 
-    for _ in 0..MAX_RETRIES {
-        match try_download(&client, &task.url, &temp_path, &progress).await {
+    for attempt in 0..MAX_RETRIES.max(urls.len() as u32) {
+        let url = &urls[(attempt as usize).min(urls.len() - 1)];
+        match try_download(&client, url, &temp_path, &progress).await {
             Ok(()) => {
                 let mut temp_task = task.clone();
                 temp_task.path = temp_path.clone();
