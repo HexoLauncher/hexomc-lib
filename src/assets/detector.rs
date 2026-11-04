@@ -127,7 +127,7 @@ fn is_shader_zip(zip_path: &Path) -> bool {
     let result = (0..archive.len()).any(|i| {
         archive
             .by_index_raw(i)
-            .map(|e| e.name().starts_with("shaders/"))
+            .map(|e| e.name().is_ok_and(|name| name.starts_with("shaders/")))
             .unwrap_or(false)
     });
     result
@@ -156,7 +156,7 @@ pub fn detect_maps(minecraft_dir: &Path) -> Vec<WorldMap> {
 /// Read one world folder. Returns `None` without a `level.dat`; unreadable NBT still
 /// yields a world named after its folder.
 pub fn read_world(path: &Path) -> Option<WorldMap> {
-    let bytes = std::fs::read(path.join("level.dat")).ok()?;
+    let bytes = nbt::read_file(&path.join("level.dat"))?;
     let folder = path
         .file_name()
         .unwrap_or_default()
@@ -207,7 +207,7 @@ pub fn dir_size(dir: &Path) -> u64 {
 
 /// Read the multiplayer server list from `servers.dat`.
 pub fn detect_servers(minecraft_dir: &Path) -> Vec<ServerEntry> {
-    let Ok(bytes) = std::fs::read(minecraft_dir.join("servers.dat")) else {
+    let Some(bytes) = nbt::read_file(&minecraft_dir.join("servers.dat")) else {
         return Vec::new();
     };
     let Some(root) = nbt::parse(&bytes) else {

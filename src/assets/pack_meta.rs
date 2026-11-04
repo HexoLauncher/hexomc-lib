@@ -76,7 +76,7 @@ impl Source {
             Source::Folder(root) => root.join(dir).is_dir(),
             Source::Zip(archive) => {
                 let prefix = format!("{}/", dir);
-                archive.file_names().any(|name| name.starts_with(&prefix))
+                archive.file_names().any(|name| name.is_ok_and(|name| name.starts_with(&prefix)))
             }
         }
     }
@@ -96,6 +96,7 @@ impl Source {
                 archive
                     .file_names()
                     .filter_map(|name| {
+                        let name = name.ok()?;
                         let rest = name.strip_prefix(&prefix)?;
                         let (folder, _) = rest.split_once('/')?;
                         (!folder.is_empty()).then(|| folder.to_string())

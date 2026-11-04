@@ -476,7 +476,30 @@ pub(crate) fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
     {
         return Err(HexoError::Other(format!("unsafe path in modpack: {}", relative)));
     }
-    Ok(root.join(rel))
+    let joined = root.join(rel);
+    for ancestor in joined.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                let linked = metadata.file_type().is_symlink();
+                #[cfg(windows)]
+                let linked = {
+                    use std::os::windows::fs::MetadataExt;
+                    linked || metadata.file_attributes() & 0x400 != 0
+                };
+                if linked {
+                    return Err(HexoError::Other(format!(
+                        "linked path in modpack destination: {}", ancestor.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+        if ancestor == root {
+            break;
+        }
+    }
+    Ok(joined)
 }
 
 /// Extract every file under `prefix/` in the zip into `dest`, stripping the prefix.
@@ -514,7 +537,7 @@ pub(crate) async fn extract_zip_dir_filtered(
             if rel.as_os_str().is_empty() || skip.contains(&rel) {
                 continue;
             }
-            let out = dest.join(&rel);
+            let out = safe_join(&dest, &rel.to_string_lossy())?;
             if entry.is_dir() {
                 std::fs::create_dir_all(&out)?;
                 continue;
@@ -693,5 +716,51 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(std::fs::read_to_string(dest.join("config/a.toml")).unwrap(), "a = 1");
         assert!(!dest.join("other").exists());
+    }
+
+    #[tokio::test]
+    async fn archive_paths_cannot_escape_after_prefix_removal() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let pack = root.path().join("pack.zip");
+        let outside = root.path().join("instance_config.json");
+        std::fs::write(&outside, b"original").unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&pack).unwrap());
+        zip.start_file("overrides/../instance_config.json", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"changed").unwrap();
+        zip.finish().unwrap();
+        let _ = extract_zip_dir(&pack, "overrides", &root.path().join("game")).await;
+        assert_eq!(std::fs::read(&outside).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_destinations_reject_existing_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, game.join("config")).unwrap();
+        assert!(safe_join(&game, "config/settings.toml").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pack_destinations_reject_existing_junctions() {
+        use std::os::windows::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let status = std::process::Command::new("powershell.exe")
+            .creation_flags(0x08000000)
+            .args(["-NoProfile", "-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:HEXOMC_TEST_LINK -Target $env:HEXOMC_TEST_TARGET -ErrorAction Stop | Out-Null"])
+            .env("HEXOMC_TEST_LINK", game.join("config"))
+            .env("HEXOMC_TEST_TARGET", &outside)
+            .status().unwrap();
+        assert!(status.success());
+        assert!(safe_join(&game, "config/settings.toml").is_err());
     }
 }

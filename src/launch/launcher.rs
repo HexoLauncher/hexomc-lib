@@ -387,36 +387,46 @@ fn replace_placeholders(
         return main_class.to_string();
     }
 
-    let mut result = arg.to_string();
-    while let Some(start) = result.find("${") {
-        let end = match result[start..].find('}') {
-            Some(i) => start + i,
-            None => break,
+    let mut result = String::with_capacity(arg.len());
+    let mut remaining = arg;
+    while let Some(start) = remaining.find("${") {
+        result.push_str(&remaining[..start]);
+        let Some(end) = remaining[start..].find('}').map(|end| start + end) else {
+            result.push_str(&remaining[start..]);
+            return result;
         };
-        let key = &result[start + 2..end];
-        if let Some(value) = data.get(key) {
-            result = format!("{}{}{}", &result[..start], value, &result[end + 1..]);
-        } else {
-            break; // Unknown key: leave as-is to avoid an infinite loop.
+        let key = &remaining[start + 2..end];
+        match data.get(key) {
+            Some(value) => result.push_str(value),
+            None => result.push_str(&remaining[start..=end]),
         }
+        remaining = &remaining[end + 1..];
     }
+    result.push_str(remaining);
     result
 }
 
+/// Encode each argument using Java's quoted argument-file syntax.
 async fn write_argfile(args: &[String], path: &Path) -> Result<()> {
-    // @argfile format: one arg per line, quoted if it contains whitespace.
-    let content = args
-        .iter()
-        .map(|a| {
-            if a.contains(' ') {
-                format!("\"{}\"", a)
-            } else {
-                a.clone()
+    let mut content = String::new();
+    for arg in args {
+        if arg.contains('\0') {
+            return Err(HexoError::Other("Java arguments cannot contain NUL".into()));
+        }
+        content.push('"');
+        for ch in arg.chars() {
+            match ch {
+                '\\' => content.push_str("\\\\"),
+                '"' => content.push_str("\\\""),
+                '\n' => content.push_str("\\n"),
+                '\r' => content.push_str("\\r"),
+                '\t' => content.push_str("\\t"),
+                '\u{000c}' => content.push_str("\\f"),
+                _ => content.push(ch),
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
+        }
+        content.push_str("\"\n");
+    }
     fs::write(path, content).await?;
     Ok(())
 }
@@ -570,6 +580,50 @@ mod tests {
         let data = make_data();
         let result = replace_placeholders("-Xmx2G", &data, "Main");
         assert_eq!(result, "-Xmx2G");
+    }
+
+    #[test]
+    fn placeholder_values_are_not_evaluated_again() {
+        let mut data = make_data();
+        data.insert("auth_player_name".into(), "${auth_player_name}".into());
+        assert_eq!(replace_placeholders("${auth_player_name}", &data, "Main"), "${auth_player_name}");
+        data.insert("auth_player_name".into(), "${version_name}".into());
+        data.insert("version_name".into(), "${auth_player_name}".into());
+        assert_eq!(replace_placeholders("${auth_player_name}", &data, "Main"), "${version_name}");
+        assert_eq!(replace_placeholders("${unknown}:${classpath}", &data, "Main"), "${unknown}:/path/to/libs.jar");
+    }
+
+    #[tokio::test]
+    async fn argfile_escapes_control_characters_and_quotes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("args.txt");
+        write_argfile(&["Alice\n--demo".into(), "C:\\Program Files\\Java\\".into(), "a\"b\t\r\u{000c}".into(), "".into()], &path).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"Alice\\n--demo\"\n\"C:\\\\Program Files\\\\Java\\\\\"\n\"a\\\"b\\t\\r\\f\"\n\"\"\n");
+        assert!(write_argfile(&["bad\0arg".into()], &path).await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Java 17 or newer on PATH"]
+    async fn argfile_roundtrips_through_java() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("ArgfileProbe.java");
+        std::fs::write(&source, r#"class ArgfileProbe {
+            public static void main(String[] args) {
+                for (String arg : args) {
+                    for (char ch : arg.toCharArray()) System.out.printf("%04x", (int) ch);
+                    System.out.println();
+                }
+            }
+        }"#).unwrap();
+        let values = ["Alice\n--demo", "", "a\"b", "C:\\Program Files\\Java\\", "#comment", "a\t\r\u{000c}b", "@another-file"];
+        let mut args = vec![source.to_string_lossy().into_owned()];
+        args.extend(values.iter().map(|value| value.to_string()));
+        let argfile = root.path().join("args.txt");
+        write_argfile(&args, &argfile).await.unwrap();
+        let output = Command::new("java").arg(format!("@{}", argfile.display())).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let expected: Vec<String> = values.iter().map(|value| value.encode_utf16().map(|ch| format!("{ch:04x}")).collect()).collect();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).lines().collect::<Vec<_>>(), expected);
     }
 
     #[tokio::test]
