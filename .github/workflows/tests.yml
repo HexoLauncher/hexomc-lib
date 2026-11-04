@@ -57,9 +57,9 @@ jobs:
         run: python3 .github/scripts/test_matrix.py
 
   installation:
-    name: Minecraft ${{ matrix.minecraft }} / ${{ matrix.loader }}
+    name: Minecraft ${{ matrix.minecraft }} / ${{ matrix.loader }} (${{ matrix.os }})
     needs: matrix
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -91,16 +91,24 @@ jobs:
           restore-keys: |
             minecraft-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.minecraft }}-${{ matrix.loader }}-
       - name: Install display and audio dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb xauth xdotool x11-utils x11-xserver-utils mesa-utils libgl1-mesa-dri libglx-mesa0 libegl1 mesa-vulkan-drivers libvulkan1 vulkan-tools libasound2t64 libopenal1 flite1-dev libxtst6 libxrandr2 libxi6 libxcursor1 libxinerama1
       - name: Install Minecraft and verify client startup
+        if: runner.os == 'Linux'
         run: xvfb-run -a -s '-screen 0 1280x1024x24 +extension GLX' bash .github/scripts/run_installation_test.sh
+      - name: Install Minecraft and verify client startup (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$MC_TEST_DIR/diagnostics"
+          system_profiler SPDisplaysDataType 2>&1 | tee "$MC_TEST_DIR/diagnostics/display.log"
+          cargo test --locked --test installation install_and_launch -- --ignored --exact --nocapture
       - name: Upload startup diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: minecraft-${{ matrix.minecraft }}-${{ matrix.loader }}-logs
+          name: minecraft-${{ matrix.minecraft }}-${{ matrix.loader }}-${{ matrix.os }}-logs
           include-hidden-files: true
           if-no-files-found: ignore
           path: |

@@ -8,8 +8,10 @@ use crate::{
 };
 
 const ADOPTIUM_API: &str = "https://api.adoptium.net/v3/assets/latest";
+const ZULU_API: &str = "https://api.azul.com/metadata/v1/zulu/packages";
 
-/// Download an Adoptium Temurin JRE to `{base_dir}/java/{version}/`.
+/// Download a JRE to `{base_dir}/java/{version}/`: Adoptium Temurin, or Azul Zulu
+/// when Temurin has no build for this platform (e.g. Java 8 on Apple Silicon).
 /// Returns the full path to the java executable.
 pub async fn download_java(version: u32, base_dir: &Path) -> Result<PathBuf> {
     download_java_with_progress(version, base_dir, no_progress()).await
@@ -33,28 +35,14 @@ pub async fn download_java_with_progress(
     fs::create_dir_all(&java_dir).await?;
 
     progress(0, 0, "Fetching Java release");
-    let (os, arch, archive_type) = platform_info();
-    let url = format!(
-        "{}/{}/hotspot?image_type=jre&os={}&architecture={}&vendor=eclipse",
-        ADOPTIUM_API, version, os, arch
-    );
-
+    let (_, _, archive_type) = platform_info();
     let client = reqwest::Client::new();
-    let releases: Vec<AdoptiumRelease> = client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    let release = releases
-        .into_iter()
-        .next()
-        .ok_or_else(|| HexoError::JavaNotFound { required: version })?;
-
-    let binary = &release.binary;
-    let pkg = &binary.package;
+    let pkg = match fetch_adoptium_package(&client, version).await? {
+        Some(pkg) => pkg,
+        None => fetch_zulu_package(&client, version)
+            .await?
+            .ok_or(HexoError::JavaNotFound { required: version })?,
+    };
 
     let archive_path = java_dir.join(&pkg.name);
     download_file_with_progress(&pkg.download_task(&archive_path), |downloaded, total| {
@@ -104,6 +92,100 @@ fn platform_info() -> (&'static str, &'static str, &'static str) {
     (os, arch, archive)
 }
 
+/// A downloadable JRE archive, whichever vendor it came from.
+struct JavaPackage {
+    name: String,
+    url: String,
+    sha256: String,
+    size: u64,
+}
+
+impl JavaPackage {
+    /// Both vendors publish SHA-256 checksums, not SHA1.
+    fn download_task(&self, path: &Path) -> DownloadTask {
+        DownloadTask::new(&self.url, path).with_sha256(&self.sha256)
+    }
+}
+
+async fn fetch_adoptium_package(client: &reqwest::Client, version: u32) -> Result<Option<JavaPackage>> {
+    let (os, arch, _) = platform_info();
+    let url = format!(
+        "{}/{}/hotspot?image_type=jre&os={}&architecture={}&vendor=eclipse",
+        ADOPTIUM_API, version, os, arch
+    );
+    let releases: Vec<AdoptiumRelease> = client
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(releases.into_iter().next().map(|r| r.binary.package.into()))
+}
+
+/// Azul's package list has no checksum, so the chosen package's details are fetched too.
+async fn fetch_zulu_package(client: &reqwest::Client, version: u32) -> Result<Option<JavaPackage>> {
+    let (os, arch, archive_type) = zulu_platform_info();
+    let url = format!(
+        "{}/?java_version={}&os={}&arch={}&archive_type={}&java_package_type=jre\
+         &javafx_bundled=false&crac_supported=false&latest=true&release_status=ga\
+         &availability_types=CA&page_size=10",
+        ZULU_API, version, os, arch, archive_type
+    );
+    let listed: Vec<ZuluListedPackage> = client
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let Some(listed) = listed.into_iter().find(|p| !p.name.contains("musl")) else {
+        return Ok(None);
+    };
+    let details: ZuluPackage = client
+        .get(format!("{}/{}", ZULU_API, listed.package_uuid))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(Some(details.into()))
+}
+
+fn zulu_platform_info() -> (&'static str, &'static str, &'static str) {
+    let (os, _, archive) = platform_info();
+    let os = if os == "mac" { "macos" } else { os };
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86"
+    };
+    (os, arch, archive)
+}
+
+#[derive(serde::Deserialize)]
+struct ZuluListedPackage {
+    name: String,
+    package_uuid: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ZuluPackage {
+    name: String,
+    download_url: String,
+    sha256_hash: String,
+    #[serde(default)]
+    size: u64,
+}
+
+impl From<ZuluPackage> for JavaPackage {
+    fn from(p: ZuluPackage) -> Self {
+        Self { name: p.name, url: p.download_url, sha256: p.sha256_hash, size: p.size }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct AdoptiumRelease {
     binary: AdoptiumBinary,
@@ -123,10 +205,9 @@ struct AdoptiumPackage {
     size: u64,
 }
 
-impl AdoptiumPackage {
-    /// Adoptium's package checksum is SHA-256, not SHA1.
-    fn download_task(&self, path: &Path) -> DownloadTask {
-        DownloadTask::new(&self.link, path).with_sha256(&self.checksum)
+impl From<AdoptiumPackage> for JavaPackage {
+    fn from(p: AdoptiumPackage) -> Self {
+        Self { name: p.name, url: p.link, sha256: p.checksum, size: p.size }
     }
 }
 
@@ -223,6 +304,21 @@ mod tests {
         assert!(find_java_bin_in(temp.path()).is_none());
     }
 
+    #[test]
+    fn zulu_package_details_parse() {
+        let package: ZuluPackage = serde_json::from_str(
+            r#"{
+            "name": "zulu8-jre.tar.gz", "download_url": "https://cdn.azul.com/zulu8-jre.tar.gz",
+            "sha256_hash": "2bf6", "size": 40158500, "md5_hash": "a530"
+        }"#,
+        )
+        .unwrap();
+        let package = JavaPackage::from(package);
+        assert_eq!(package.url, "https://cdn.azul.com/zulu8-jre.tar.gz");
+        assert_eq!(package.sha256, "2bf6");
+        assert_eq!(package.size, 40158500);
+    }
+
     #[tokio::test]
     async fn adoptium_package_validates_cached_archive_with_sha256() {
         let package: AdoptiumPackage = serde_json::from_str(
@@ -232,12 +328,13 @@ mod tests {
         }"#,
         )
         .unwrap();
+        let package = JavaPackage::from(package);
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(&package.name);
         fs::write(&path, b"abc").await.unwrap();
         let task = package.download_task(&path);
         assert!(task.sha1.is_none());
-        assert_eq!(task.sha256.as_deref(), Some(package.checksum.as_str()));
+        assert_eq!(task.sha256.as_deref(), Some(package.sha256.as_str()));
         crate::download::download_file(&task).await.unwrap();
     }
 }

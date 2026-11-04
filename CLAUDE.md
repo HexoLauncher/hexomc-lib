@@ -21,7 +21,7 @@ cargo run --example launch_modpack -- <pack.mrpack|pack.zip>   # install + launc
 cargo clippy --all-targets        # lint
 ```
 
-Integration tests (`tests/integration.rs`) are **not** `#[ignore]`d: they hit live Mojang/Fabric/Forge/NeoForge/ATLauncher/FTB APIs and run under plain `cargo test`, so use `cargo test --lib` offline. A few network unit tests in `version::manifest` are `#[ignore]`d and need `--ignored`. The examples are the primary end-to-end exercise of the install→launch pipeline and write to `./mc_data`.
+Integration tests (`tests/integration.rs`) are **not** `#[ignore]`d: they hit live Mojang/Fabric/Forge/NeoForge/ATLauncher/FTB APIs and run under plain `cargo test`, so use `cargo test --lib` offline. A few network unit tests in `version::manifest` are `#[ignore]`d and need `--ignored`. The examples are the primary end-to-end exercise of the install→launch pipeline and write to `./mc_data`. In CI, the ignored `install_and_launch` test (`tests/installation.rs`) installs and starts every version/loader from `.github/scripts/test_matrix.py` on Linux (Xvfb, window found with `xdotool`) and on Apple Silicon macOS (window found by owner PID through CoreGraphics, via `osascript`); set `MC_TEST_VERSION`, `MC_TEST_LOADER`, `MC_TEST_LOADER_VERSION` and `MC_TEST_DIR` to run it locally.
 
 ## Architecture
 
@@ -59,9 +59,11 @@ Use `install_modpack_files`, `install_mrpack_files`, `install_cfpack_files`, `in
 
 ### On-disk layout
 
-`download_java` first reuses an existing executable under `java/{version}/jre`, before network access. `download_java_with_progress` accepts `ProgressFn`: the `Downloading Java` stage reports bytes (total zero means unknown; retries reset the count), while metadata, reuse, extraction, and completion stages report `(0, 0)`. The shared `download_file_with_progress` reports per-file bytes and retains checksum verification and retries; batch progress still counts files. Adoptium's package size is used when the download response omits its length.
+`download_java` first reuses an existing executable under `java/{version}/jre`, before network access. `download_java_with_progress` accepts `ProgressFn`: the `Downloading Java` stage reports bytes (total zero means unknown; retries reset the count), while metadata, reuse, extraction, and completion stages report `(0, 0)`. The shared `download_file_with_progress` reports per-file bytes and retains checksum verification and retries; batch progress still counts files. Adoptium's package size is used when the download response omits its length. Temurin is tried first; when it has no build for the platform (Java 8 and 16 on Apple Silicon) Azul Zulu is used, with its SHA-256 from the package-details endpoint.
 
 A launcher root (`base_dir`, e.g. `./mc_data`) contains shared `assets/` and `libraries/`, plus per-instance `instance/{instance_name}/`. Each instance dir holds `instance_config.json` (the serialized `InstanceConfig`: main class, `start_args` with placeholders, library/native lists, `assets_id`, `java_version`) and a `natives/` dir. `InstanceConfig::save`/`load` is the contract between the install and launch phases — launch reads this file, never the loader APIs.
+
+On macOS arm64 builds, launch runs `ensure_arm64_lwjgl` (`install/arm64_mac.rs`) on the loaded config before extracting natives, because Mojang shipped only x86_64 macOS natives before 1.19. LWJGL 2 becomes 2.9.4-nightly-20150209 with arm64 LWJGL/jinput natives (≤ 1.12.2). LWJGL 3.1/3.2 becomes Mojang's 3.3.1 with `natives-macos-arm64` jars on the classpath (1.13 – 1.18.2), `java-objc-bridge` 1.0.0 (narrator, 1.12 – 1.18.2) becomes MinecraftMachina's Java 8 build of 1.1 (Mojang's 1.1 targets Java 11, which crashes 1.12.x / 1.13.x on Java 8) and JNA 4.x becomes 5.10.0. Missing jars are downloaded, duplicates dropped and the config saved. GLFW 3.4 errors on `glfwSetWindowIcon` on macOS, which aborts 1.13 – 1.17.1, so `patched_glfw` copies Mojang's 3.3.1 arm64 `libglfw.dylib` with that function turned into `ret`, ad-hoc re-signs it with `codesign`, and returns `-Dorg.lwjgl.glfw.libname` as an extra JVM arg. `natives/` is wiped and re-extracted on every launch.
 
 ### Launch specifics
 

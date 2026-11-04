@@ -240,6 +240,7 @@ async fn verify_installation(
 }
 
 /// SDL3 needs PID matching; LWJGL2 windows may only expose the legacy title.
+#[cfg(not(target_os = "macos"))]
 async fn visible_minecraft_window(pid: u32) -> bool {
     tokio::process::Command::new("xdotool")
         .args(["search", "--onlyvisible", "--any", "--pid", &pid.to_string(), "--name", "^Minecraft"])
@@ -248,13 +249,51 @@ async fn visible_minecraft_window(pid: u32) -> bool {
         .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
+/// Prints `[[pid, owner, bounds], ...]` for the normal on-screen windows of `argv[0]`
+/// (every process when it is 0). Window titles need Screen Recording permission,
+/// so macOS matches on the owning PID and a window size instead of the title.
+#[cfg(target_os = "macos")]
+const MAC_WINDOWS_JXA: &str = r#"ObjC.import("CoreGraphics");
+function run(argv) {
+  const pid = Number(argv[0]);
+  const windows = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0))) || [];
+  return JSON.stringify(windows
+    .filter(w => w.kCGWindowLayer === 0 && (pid === 0 || w.kCGWindowOwnerPID === pid))
+    .map(w => [w.kCGWindowOwnerPID, w.kCGWindowOwnerName, w.kCGWindowBounds]));
+}"#;
+
+#[cfg(target_os = "macos")]
+async fn visible_minecraft_window(pid: u32) -> bool {
+    let Ok(output) = tokio::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", MAC_WINDOWS_JXA, &pid.to_string()])
+        .output()
+        .await
+    else {
+        return false;
+    };
+    let windows: Vec<(u32, String, serde_json::Value)> =
+        serde_json::from_slice(&output.stdout).unwrap_or_default();
+    windows.iter().any(|(_, _, bounds)| {
+        bounds["Width"].as_f64().unwrap_or(0.0) >= 320.0
+            && bounds["Height"].as_f64().unwrap_or(0.0) >= 240.0
+    })
+}
+
 async fn save_window_diagnostics(path: &Path, pid: u32) {
     let pid = pid.to_string();
     let mut log = String::new();
-    for (command, args) in [
+    #[cfg(not(target_os = "macos"))]
+    let commands = [
         ("xwininfo", vec!["-root", "-tree"]),
         ("xdotool", vec!["search", "--onlyvisible", "--pid", &pid]),
-    ] {
+    ];
+    #[cfg(target_os = "macos")]
+    let commands = [
+        ("osascript", vec!["-l", "JavaScript", "-e", MAC_WINDOWS_JXA, "0"]),
+        ("ps", vec!["-o", "pid,ppid,stat,command", "-p", &pid]),
+    ];
+    for (command, args) in commands {
         log.push_str(&format!("{command} {}\n", args.join(" ")));
         let mut child = tokio::process::Command::new(command);
         child.args(args).kill_on_drop(true);
@@ -330,7 +369,7 @@ async fn verify_startup(root: &Path, instance: &str, stage: &str, java: PathBuf)
 }
 
 #[tokio::test]
-#[ignore = "requires network, downloaded Java, Xvfb and xdotool"]
+#[ignore = "requires network, downloaded Java and a display (Xvfb and xdotool on Linux)"]
 async fn install_and_launch() -> TestResult {
     let version = std::env::var("MC_TEST_VERSION")?;
     let loader_name = std::env::var("MC_TEST_LOADER")?;

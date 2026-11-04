@@ -23,6 +23,7 @@ pub use download::mirror::{
 };
 
 pub use install::vanilla::{install_vanilla, InstanceConfig, LoaderType, LibEntry, NativeEntry};
+pub use install::arm64_mac::{ensure_arm64_lwjgl, is_arm64_mac, Arm64Fixes};
 pub use install::fabric::{install_fabric, get_fabric_loader_versions};
 pub use install::forge::{install_forge, get_forge_versions};
 pub use install::neoforge::{install_neoforge, get_neoforge_versions};
@@ -89,4 +90,8 @@ pub use modpack::atpack::{
 pub use assets::detector::{
     detect_resource_packs, detect_shader_packs, detect_maps, detect_servers, dir_size,
     read_world, GameMode, ResourcePack, ServerEntry, ShaderPack, WorldMap,
+};
+pub use assets::pack_meta::{
+    active_resource_packs, active_shader_pack, read_resource_pack_meta, read_shader_pack_meta,
+    ResourcePackMeta, ShaderPackMeta,
 };

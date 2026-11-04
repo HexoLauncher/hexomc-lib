@@ -98,6 +98,21 @@ class MatrixTests(unittest.TestCase):
         ):
             test_matrix.build_matrix()
 
+    def test_runners_only_get_their_versions(self):
+        matrix, _ = test_matrix.build_matrix()
+        expanded = test_matrix.for_each_runner(matrix)["include"]
+        linux = [row for row in expanded if row["os"] == "ubuntu-24.04"]
+        self.assertEqual([{k: v for k, v in row.items() if k != "os"} for row in linux], matrix["include"])
+        mac = {(row["minecraft"], row["loader"]) for row in expanded if row["os"] == "macos-latest"}
+        self.assertEqual(
+            mac,
+            {("1.0", "vanilla"), ("1.7.10", "vanilla"), ("1.7.10", "forge"), ("15w14a", "vanilla")},
+        )
+
+    def test_runner_versions_are_in_the_matrix(self):
+        for versions in test_matrix.RUNNERS.values():
+            self.assertLessEqual(set(versions), set(test_matrix.VERSIONS))
+
     def test_missing_minecraft_version_fails(self):
         self.responses[MANIFEST_URL]["versions"] = [{"id": "1.0"}]
         with self.assertRaisesRegex(

@@ -1,3 +1,4 @@
+pub mod arm64_mac;
 pub mod fabric;
 pub mod forge;
 pub mod loader;

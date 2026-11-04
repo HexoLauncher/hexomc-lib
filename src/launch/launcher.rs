@@ -10,7 +10,7 @@ use tokio::{fs, sync::mpsc};
 
 use crate::{
     error::{HexoError, Result},
-    install::vanilla::InstanceConfig,
+    install::{arm64_mac::ensure_arm64_lwjgl, vanilla::InstanceConfig},
     launch::output::{GameProcess, OutputFn, OutputLine},
 };
 
@@ -166,7 +166,11 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
     let base_dir_buf = PathBuf::from(base_str);
     let base_dir = base_dir_buf.as_path();
     let instance_dir = base_dir.join("instance").join(&options.instance_id);
-    let config = InstanceConfig::load(&instance_dir).await?;
+    let mut config = InstanceConfig::load(&instance_dir).await?;
+    let arm64 = ensure_arm64_lwjgl(&mut config, &base_dir.join("libraries")).await?;
+    if arm64.config_changed {
+        config.save(&instance_dir).await?;
+    }
 
     let natives_dir = instance_dir.join("natives");
     extract_natives(&config, &natives_dir)?;
@@ -176,6 +180,7 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
 
     let mut final_args: Vec<String> = Vec::new();
     final_args.extend(options.jvm_extra_args.iter().cloned());
+    final_args.extend(arm64.jvm_args);
 
     // Old-format start_args (e.g. 1.7.10) contain only game args — no -cp, natives,
     // or ${mainClass} — so we supply the JVM section ourselves.
@@ -204,6 +209,14 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
     command
         .current_dir(&minecraft_dir)
         .env("JAVA_TOOL_OPTIONS", "-Dfile.encoding=UTF-8");
+    // cargo run / cargo test (and so `tauri dev`) export a ~1 KB
+    // DYLD_FALLBACK_LIBRARY_PATH. dyld lists every entry in its dlopen error, which
+    // overflows JNA's message buffer, and JNA (5.10 and 5.12.1 at least) then
+    // aborts on an assertion when oshi probes `libIOKit.dylib` (1.18.2, 1.20.1).
+    // The game needs neither variable.
+    if cfg!(target_os = "macos") {
+        command.env_remove("DYLD_FALLBACK_LIBRARY_PATH").env_remove("DYLD_LIBRARY_PATH");
+    }
 
     // @argfile is Java 9+ only; Java 8 (e.g. Forge 1.7.10) treats "@tempcmd.txt" as
     // the main-class name, so pass args on the command line there instead. The
@@ -222,7 +235,12 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
     Ok(Prepared { command, argfile })
 }
 
+/// Re-extract every native jar into a fresh `natives_dir`, so libraries left over
+/// from an earlier install (e.g. x86_64 LWJGL on Apple Silicon) can't be loaded.
 fn extract_natives(config: &InstanceConfig, natives_dir: &Path) -> Result<()> {
+    if natives_dir.exists() {
+        std::fs::remove_dir_all(natives_dir)?;
+    }
     std::fs::create_dir_all(natives_dir)?;
 
     for native in &config.natives {

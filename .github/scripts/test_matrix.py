@@ -6,6 +6,12 @@ from pathlib import Path
 
 
 VERSIONS = ("1.0", "26.3", "1.12.2", "1.7.10", "1.6.4", "15w14a", "26w14a")
+# Minecraft versions each runner tests. macos-latest is Apple Silicon, where old
+# versions only start with the arm64 library swaps.
+RUNNERS = {
+    "ubuntu-24.04": VERSIONS,
+    "macos-latest": ("1.0", "1.7.10", "15w14a"),
+}
 
 
 def fetch(url):
@@ -68,8 +74,20 @@ def build_matrix():
     return {"include": matrix}, "\n".join(summary) + "\n"
 
 
+def for_each_runner(matrix):
+    return {
+        "include": [
+            {"os": runner, **row}
+            for runner, versions in RUNNERS.items()
+            for row in matrix["include"]
+            if row["minecraft"] in versions
+        ]
+    }
+
+
 if __name__ == "__main__":
     matrix, summary = build_matrix()
+    matrix = for_each_runner(matrix)
     print(json.dumps(matrix))
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
         output.write(f"matrix={json.dumps(matrix)}\n")
