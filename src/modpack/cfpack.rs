@@ -198,8 +198,9 @@ pub async fn install_cfpack_files(
                 website: project
                     .and_then(|p| p.links.as_ref())
                     .and_then(|l| l.website_url.as_ref())
-                    .map(|u| format!("{}/files/{}", u, file.id)),
+                    .map(|u| format!("{}/download/{}", u.trim_end_matches('/'), file.id)),
                 dest,
+                sha1: file.sha1().map(|s| s.to_string()),
             }),
         }
     }

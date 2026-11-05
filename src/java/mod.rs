@@ -4,4 +4,7 @@ pub mod scan;
 
 pub use detector::{find_java, JavaInfo};
 pub use scan::{java_search_paths, pick_java, probe_java_runtime, scan_java, JavaRuntime};
-pub use installer::{download_java, download_java_with_progress};
+pub use installer::{
+    download_java, download_java_with_progress, download_vendor_java_with_progress,
+    list_java_releases, JavaRelease, JavaVendor,
+};

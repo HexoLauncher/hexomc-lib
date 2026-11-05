@@ -85,6 +85,7 @@ pub struct ManualDownload {
     pub website: Option<String>,
     /// Where the downloaded file belongs.
     pub dest: PathBuf,
+    pub sha1: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -257,7 +258,49 @@ pub async fn install_modpack_files(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
-    let result = match detect_modpack_format(pack_path).await? {
+    let result =
+        install_modpack_files_inner(pack_path, instance_name, base_dir, curseforge, progress)
+            .await?;
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    save_modpack_state(instance_name, base_dir, managed_files).await?;
+    Ok(result)
+}
+
+pub async fn update_modpack_files(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    curseforge: Option<&CurseForgeClient>,
+    progress: ProgressFn,
+) -> Result<ModpackUpdateResult> {
+    let previous = load_modpack_state(instance_name, base_dir).await?;
+    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
+    let install =
+        install_modpack_files_inner(pack_path, instance_name, base_dir, curseforge, progress)
+            .await?;
+    let game_dir = instance_game_dir(base_dir, instance_name);
+    let removed_files = remove_obsolete_managed_files(
+        &game_dir,
+        previous.as_ref().map(|state| &state.managed_files),
+        &managed_files,
+    )
+    .await?;
+    save_modpack_state(instance_name, base_dir, managed_files).await?;
+
+    Ok(ModpackUpdateResult {
+        install,
+        removed_files,
+    })
+}
+
+async fn install_modpack_files_inner(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    curseforge: Option<&CurseForgeClient>,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
+    match detect_modpack_format(pack_path).await? {
         ModpackFormat::Modrinth => {
             mrpack::install_mrpack_files(pack_path, instance_name, base_dir, progress).await
         }
@@ -273,10 +316,7 @@ pub async fn install_modpack_files(
         ModpackFormat::Mcbbs => {
             hmclpack::install_mcbbs_pack_files(pack_path, instance_name, base_dir, progress).await
         }
-    }?;
-    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
-    save_modpack_state(instance_name, base_dir, managed_files).await?;
-    Ok(result)
+    }
 }
 
 async fn managed_files_for_local(

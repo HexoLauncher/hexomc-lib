@@ -480,21 +480,41 @@ async fn run_processors(
             })
             .collect();
 
-        let status = std::process::Command::new(java_path)
+        let mut command = std::process::Command::new(java_path);
+        command
             .args(["-cp", &cp, &main_class])
             .args(&resolved_args)
-            .status()
+            .stdin(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = command
+            .output()
             .map_err(|e| HexoError::ProcessorFailed(e.to_string()))?;
 
-        if !status.success() {
+        if !output.status.success() {
             return Err(HexoError::ProcessorFailed(format!(
-                "processor {} exited with a non-zero status",
-                proc.jar
+                "processor {} exited with a non-zero status\n{}",
+                proc.jar,
+                output_tail(&output.stdout, &output.stderr, 20)
             )));
         }
     }
 
     Ok(())
+}
+
+fn output_tail(stdout: &[u8], stderr: &[u8], lines: usize) -> String {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    let kept: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    kept[kept.len().saturating_sub(lines)..].join("\n")
 }
 
 async fn read_json_from_zip<T: serde::de::DeserializeOwned + Send + 'static>(
@@ -646,6 +666,17 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+
+    #[test]
+    fn processor_error_keeps_only_the_last_lines() {
+        let stdout = b"Applying: a\n\nnet/minecraft/A.class\nnet/minecraft/B.class\n";
+        let stderr = b"Exception in thread main\n  at Patcher.run\n";
+        assert_eq!(
+            output_tail(stdout, stderr, 3),
+            "net/minecraft/B.class\nException in thread main\n  at Patcher.run"
+        );
+        assert_eq!(output_tail(b"", b"", 5), "");
+    }
 
     async fn base_config(directory: &Path) {
         fs::create_dir_all(directory).await.unwrap();

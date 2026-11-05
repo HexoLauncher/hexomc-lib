@@ -8,7 +8,39 @@ use crate::{
 };
 
 const ADOPTIUM_API: &str = "https://api.adoptium.net/v3/assets/latest";
+const ADOPTIUM_RELEASES_API: &str = "https://api.adoptium.net/v3/info/available_releases";
 const ZULU_API: &str = "https://api.azul.com/metadata/v1/zulu/packages";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JavaVendor {
+    Temurin,
+    Zulu,
+}
+
+impl JavaVendor {
+    pub const ALL: [JavaVendor; 2] = [JavaVendor::Temurin, JavaVendor::Zulu];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            JavaVendor::Temurin => "temurin",
+            JavaVendor::Zulu => "zulu",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            JavaVendor::Temurin => "Eclipse Temurin",
+            JavaVendor::Zulu => "Azul Zulu",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct JavaRelease {
+    pub version: u32,
+    pub lts: bool,
+}
 
 /// Download a JRE to `{base_dir}/java/{version}/`: Adoptium Temurin, or Azul Zulu
 /// when Temurin has no build for this platform (e.g. Java 8 on Apple Silicon).
@@ -27,22 +59,98 @@ pub async fn download_java_with_progress(
     progress: ProgressFn,
 ) -> Result<PathBuf> {
     let java_dir = base_dir.join("java").join(version.to_string());
+    install_java_into(&java_dir, version, None, progress).await
+}
+
+pub async fn download_vendor_java_with_progress(
+    vendor: JavaVendor,
+    version: u32,
+    base_dir: &Path,
+    progress: ProgressFn,
+) -> Result<PathBuf> {
+    let java_dir = base_dir
+        .join("java")
+        .join(format!("{}-{}", vendor.id(), version));
+    install_java_into(&java_dir, version, Some(vendor), progress).await
+}
+
+pub async fn list_java_releases(vendor: JavaVendor) -> Result<Vec<JavaRelease>> {
+    let client = reqwest::Client::new();
+    let mut versions = match vendor {
+        JavaVendor::Temurin => {
+            let info: AdoptiumAvailableReleases = client
+                .get(ADOPTIUM_RELEASES_API)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            info.available_releases
+        }
+        JavaVendor::Zulu => {
+            let listed: Vec<ZuluListedPackage> = client
+                .get(zulu_packages_url(None))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            listed
+                .into_iter()
+                .filter(|p| !p.name.contains("musl"))
+                .filter_map(|p| p.java_version.first().copied())
+                .collect()
+        }
+    };
+    versions.sort_unstable_by(|a, b| b.cmp(a));
+    versions.dedup();
+    Ok(versions
+        .into_iter()
+        .map(|version| JavaRelease {
+            version,
+            lts: is_lts(version),
+        })
+        .collect())
+}
+
+fn is_lts(version: u32) -> bool {
+    version == 8 || version == 11 || (version >= 17 && (version - 17) % 4 == 0)
+}
+
+async fn fetch_package(
+    client: &reqwest::Client,
+    version: u32,
+    vendor: Option<JavaVendor>,
+) -> Result<Option<JavaPackage>> {
+    match vendor {
+        Some(JavaVendor::Temurin) => fetch_adoptium_package(client, version).await,
+        Some(JavaVendor::Zulu) => fetch_zulu_package(client, version).await,
+        None => match fetch_adoptium_package(client, version).await? {
+            Some(pkg) => Ok(Some(pkg)),
+            None => fetch_zulu_package(client, version).await,
+        },
+    }
+}
+
+async fn install_java_into(
+    java_dir: &Path,
+    version: u32,
+    vendor: Option<JavaVendor>,
+    progress: ProgressFn,
+) -> Result<PathBuf> {
     let extract_dir = java_dir.join("jre");
     if let Some(java_bin) = find_java_bin_in(&extract_dir) {
         progress(0, 0, "Using installed Java");
         return Ok(java_bin);
     }
-    fs::create_dir_all(&java_dir).await?;
+    fs::create_dir_all(java_dir).await?;
 
     progress(0, 0, "Fetching Java release");
     let (_, _, archive_type) = platform_info();
     let client = reqwest::Client::new();
-    let pkg = match fetch_adoptium_package(&client, version).await? {
-        Some(pkg) => pkg,
-        None => fetch_zulu_package(&client, version)
-            .await?
-            .ok_or(HexoError::JavaNotFound { required: version })?,
-    };
+    let pkg = fetch_package(&client, version, vendor)
+        .await?
+        .ok_or(HexoError::JavaNotFound { required: version })?;
 
     let archive_path = java_dir.join(&pkg.name);
     download_file_with_progress(&pkg.download_task(&archive_path), |downloaded, total| {
@@ -125,15 +233,8 @@ async fn fetch_adoptium_package(client: &reqwest::Client, version: u32) -> Resul
 
 /// Azul's package list has no checksum, so the chosen package's details are fetched too.
 async fn fetch_zulu_package(client: &reqwest::Client, version: u32) -> Result<Option<JavaPackage>> {
-    let (os, arch, archive_type) = zulu_platform_info();
-    let url = format!(
-        "{}/?java_version={}&os={}&arch={}&archive_type={}&java_package_type=jre\
-         &javafx_bundled=false&crac_supported=false&latest=true&release_status=ga\
-         &availability_types=CA&page_size=10",
-        ZULU_API, version, os, arch, archive_type
-    );
     let listed: Vec<ZuluListedPackage> = client
-        .get(&url)
+        .get(zulu_packages_url(Some(version)))
         .send()
         .await?
         .error_for_status()?
@@ -152,7 +253,21 @@ async fn fetch_zulu_package(client: &reqwest::Client, version: u32) -> Result<Op
     Ok(Some(details.into()))
 }
 
-fn zulu_platform_info() -> (&'static str, &'static str, &'static str) {
+fn zulu_packages_url(version: Option<u32>) -> String {
+    let (os, arch, archive_type) = zulu_platform_info();
+    let (version, page_size) = match version {
+        Some(v) => (format!("java_version={}&", v), 10),
+        None => (String::new(), 1000),
+    };
+    format!(
+        "{}/?{}os={}&arch={}&archive_type={}&java_package_type=jre\
+         &javafx_bundled=false&crac_supported=false&latest=true&release_status=ga\
+         &availability_types=CA&page_size={}",
+        ZULU_API, version, os, arch, archive_type, page_size
+    )
+}
+
+fn zulu_platform_info() ->(&'static str, &'static str, &'static str) {
     let (os, _, archive) = platform_info();
     let os = if os == "mac" { "macos" } else { os };
     let arch = if cfg!(target_arch = "x86_64") {
@@ -169,6 +284,13 @@ fn zulu_platform_info() -> (&'static str, &'static str, &'static str) {
 struct ZuluListedPackage {
     name: String,
     package_uuid: String,
+    #[serde(default)]
+    java_version: Vec<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct AdoptiumAvailableReleases {
+    available_releases: Vec<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -302,6 +424,45 @@ mod tests {
         let name = if cfg!(windows) { "java.exe" } else { "java" };
         std::fs::create_dir_all(temp.path().join("bin").join(name)).unwrap();
         assert!(find_java_bin_in(temp.path()).is_none());
+    }
+
+    #[test]
+    fn lts_versions() {
+        let lts: Vec<u32> = (8..=30).filter(|&v| is_lts(v)).collect();
+        assert_eq!(lts, [8, 11, 17, 21, 25, 29]);
+    }
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn vendors_list_current_lts_releases() {
+        for vendor in JavaVendor::ALL {
+            let releases = list_java_releases(vendor).await.unwrap();
+            assert!(releases.windows(2).all(|w| w[0].version > w[1].version));
+            for lts in [8, 17, 21] {
+                let release = JavaRelease { version: lts, lts: true };
+                assert!(releases.contains(&release), "{vendor:?} {lts}");
+            }
+        }
+    }
+
+    #[test]
+    fn zulu_listing_url_has_optional_version_filter() {
+        assert!(!zulu_packages_url(None).contains("java_version="));
+        assert!(zulu_packages_url(Some(21)).contains("java_version=21&"));
+    }
+
+    #[tokio::test]
+    async fn vendor_java_is_reused_from_vendor_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin_dir = temp.path().join("java/zulu-17/jre/zulu17-jre/bin");
+        fs::create_dir_all(&bin_dir).await.unwrap();
+        let java_bin = bin_dir.join(if cfg!(windows) { "java.exe" } else { "java" });
+        fs::write(&java_bin, b"existing runtime").await.unwrap();
+        let actual =
+            download_vendor_java_with_progress(JavaVendor::Zulu, 17, temp.path(), no_progress())
+                .await
+                .unwrap();
+        assert_eq!(actual, java_bin);
     }
 
     #[test]

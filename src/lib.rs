@@ -38,7 +38,10 @@ pub use java::detector::{find_java, probe_java, JavaInfo};
 pub use java::scan::{
     java_search_paths, pick_java, probe_java_runtime, scan_java, JavaRuntime,
 };
-pub use java::installer::{download_java, download_java_with_progress};
+pub use java::installer::{
+    download_java, download_java_with_progress, download_vendor_java_with_progress,
+    list_java_releases, JavaRelease, JavaVendor,
+};
 
 pub use launch::launcher::{launch, launch_with_channel, launch_with_output, LaunchOptions};
 pub use launch::crash::{analyze_crash, find_crash_files, CrashCause, CrashFiles};
@@ -52,7 +55,9 @@ pub use auth::session::join_server;
 pub use mods::detector::{
     detect_mods, read_mod_icon, read_mod_info, DependencyKind, ModDependency, ModInfo, ModLoader,
 };
-pub use mods::curseforge::CurseForgeClient;
+pub use mods::curseforge::{
+    curseforge_fingerprint, file_curseforge_fingerprint, CfFingerprintMatch, CurseForgeClient,
+};
 pub use mods::modrinth::{ModrinthClient, MrProject, MrVersion};
 pub use mods::updater::{check_updates, update_mod, ModUpdate, UpdateSource};
 pub use mods::resolve::{
@@ -68,8 +73,8 @@ pub use browse::{
 
 pub use modpack::{
     detect_modpack_format, install_modpack, install_modpack_files, resolve_forge_version,
-    update_modpack, ManualDownload, ModpackFormat, ModpackInfo, ModpackInstallResult,
-    ModpackUpdateResult,
+    update_modpack, update_modpack_files, ManualDownload, ModpackFormat, ModpackInfo,
+    ModpackInstallResult, ModpackUpdateResult,
 };
 pub use modpack::mrpack::{install_mrpack, install_mrpack_files, read_mrpack_index, MrpackIndex};
 pub use modpack::cfpack::{install_cfpack, install_cfpack_files, read_cf_manifest, CfManifest};

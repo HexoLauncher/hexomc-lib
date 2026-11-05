@@ -394,6 +394,7 @@ async fn install_config_files(
                 file_name: m.file.clone(),
                 website: m.website.clone().or_else(|| Some(m.url.clone())),
                 dest,
+                sha1: m.sha1.clone(),
             });
             continue;
         }

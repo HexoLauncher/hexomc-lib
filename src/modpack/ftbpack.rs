@@ -260,8 +260,9 @@ fn resolve_files(
                 website: project
                     .and_then(|p| p.links.as_ref())
                     .and_then(|l| l.website_url.as_ref())
-                    .map(|url| format!("{}/files/{}", url.trim_end_matches('/'), reference.file)),
+                    .map(|url| format!("{}/download/{}", url.trim_end_matches('/'), reference.file)),
                 dest,
+                sha1: file.and_then(|f| f.sha1()).map(|s| s.to_string()),
             });
         }
     }
@@ -597,8 +598,9 @@ mod tests {
                 assert_eq!(manual[0].file_name, entry.name);
                 assert_eq!(
                     manual[0].website.as_deref(),
-                    Some("https://www.curseforge.com/minecraft/mc-mods/example/files/456")
+                    Some("https://www.curseforge.com/minecraft/mc-mods/example/download/456")
                 );
+                assert_eq!(manual[0].sha1.as_deref(), Some("abc"));
             }
         }
     }

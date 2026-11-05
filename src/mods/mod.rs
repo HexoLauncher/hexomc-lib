@@ -4,7 +4,9 @@ pub mod modrinth;
 pub mod resolve;
 pub mod updater;
 
-pub use curseforge::CurseForgeClient;
+pub use curseforge::{
+    curseforge_fingerprint, file_curseforge_fingerprint, CfFingerprintMatch, CurseForgeClient,
+};
 pub use detector::{
     detect_mods, read_mod_icon, read_mod_info, DependencyKind, ModDependency, ModInfo, ModLoader,
 };
