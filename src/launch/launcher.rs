@@ -10,7 +10,12 @@ use tokio::{fs, sync::mpsc};
 
 use crate::{
     error::{HexoError, Result},
-    install::{arm64_mac::ensure_arm64_lwjgl, vanilla::InstanceConfig},
+    install::{
+        arm64_mac::ensure_arm64_lwjgl,
+        forge::prepare_forge_compatibility,
+        forge_jarmod::CLIENT_ENTRY,
+        vanilla::{InstanceConfig, LoaderType},
+    },
     launch::output::{GameProcess, OutputFn, OutputLine},
 };
 
@@ -167,6 +172,7 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
     let base_dir = base_dir_buf.as_path();
     let instance_dir = base_dir.join("instance").join(&options.instance_id);
     let mut config = InstanceConfig::load(&instance_dir).await?;
+    prepare_forge_compatibility(&mut config, &base_dir.join("libraries"), &instance_dir).await?;
     let arm64 = ensure_arm64_lwjgl(&mut config, &base_dir.join("libraries")).await?;
     if arm64.config_changed {
         config.save(&instance_dir).await?;
@@ -179,6 +185,24 @@ async fn prepare_command(options: &LaunchOptions, base_dir: &Path) -> Result<Pre
     let argdata = build_argdata(options, base_dir, &instance_dir, &config, &classpath);
 
     let mut final_args: Vec<String> = Vec::new();
+    let forge_property = match (&config.loader_type, config.version_id.as_str()) {
+        (LoaderType::Forge, "1.5.2") => Some(("-Dminecraft.applet.TargetDirectory=", "${game_directory}")),
+        (LoaderType::Forge, _) if config.lib_list.iter().any(|entry| entry.name == CLIENT_ENTRY) => {
+            Some(("-Dminecraft.applet.TargetDirectory=", "${game_directory}"))
+        }
+        (LoaderType::Forge, "1.20.3" | "1.20.4") => Some(("-DlibraryDirectory=", "${library_directory}")),
+        _ => None,
+    };
+    if let Some((key, value)) = forge_property {
+        let has_override = options
+            .jvm_extra_args
+            .iter()
+            .chain(&config.start_args)
+            .any(|arg| arg.starts_with(key));
+        if !has_override {
+            final_args.push(replace_placeholders(&format!("{key}{value}"), &argdata, &config.main_class));
+        }
+    }
     final_args.extend(options.jvm_extra_args.iter().cloned());
     final_args.extend(arm64.jvm_args);
 
@@ -274,9 +298,11 @@ fn build_classpath(config: &InstanceConfig, instance_dir: &Path) -> String {
     let sep = classpath_sep();
     let mut seen = std::collections::HashSet::new();
     let mut artifacts = std::collections::HashSet::new();
+    let legacy_client = config.lib_list.iter().find(|entry| entry.name == CLIENT_ENTRY);
     let mut parts: Vec<String> = config
         .lib_list
         .iter()
+        .filter(|entry| entry.name != CLIENT_ENTRY)
         .filter(|lib| library_key(&lib.name).is_none_or(|key| artifacts.insert(key)))
         .filter_map(|lib| {
             // Make relative paths absolute; once Java's cwd is .minecraft/ a relative
@@ -291,7 +317,10 @@ fn build_classpath(config: &InstanceConfig, instance_dir: &Path) -> String {
         .collect();
 
     // client.jar goes last.
-    let client_jar_path = instance_dir.join(format!("{}.jar", config.version_id));
+    let client_jar_path = legacy_client.map_or_else(
+        || instance_dir.join(format!("{}.jar", config.version_id)),
+        |entry| entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone()),
+    );
     parts.push(path_str(&client_jar_path));
 
     parts.join(sep)
