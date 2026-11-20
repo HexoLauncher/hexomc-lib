@@ -75,6 +75,8 @@ impl StartupLog {
             "Minecraft has crashed!",
             "#@!@# Game crashed!",
             "Exception in thread \"main\"",
+            "Exception in thread \"Minecraft main thread\"",
+            "URI is not hierarchical",
             "Reported exception thrown!",
         ]
         .iter()
@@ -391,7 +393,11 @@ async fn install_and_launch() -> TestResult {
     };
     install_with_loader(&version, &instance, &root, loader.as_ref(), no_progress()).await?;
     let installed = verify_installation(&root, &instance, &version, loader.loader_type()).await?;
-    assert_ne!(installed.main_class, vanilla.main_class);
+    assert!(
+        installed.main_class != vanilla.main_class
+            || installed.start_args != vanilla.start_args
+            || installed.lib_list.iter().any(|entry| entry.name == "net.minecraftforge:legacy-client")
+    );
     assert!(installed.lib_list.len() > vanilla.lib_list.len());
     assert_eq!(installed.assets_id, vanilla.assets_id);
     verify_startup(&root, &instance, &loader_name, java).await

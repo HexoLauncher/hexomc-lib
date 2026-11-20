@@ -1,6 +1,7 @@
 pub mod arm64_mac;
 pub mod fabric;
 pub mod forge;
+pub(crate) mod forge_jarmod;
 pub mod loader;
 pub mod neoforge;
 pub mod vanilla;

@@ -9,7 +9,7 @@ use crate::{
     download::{download_batch, download_file, verify_sha1, DownloadTask},
     error::{HexoError, Result},
     install::vanilla::{native_key_for_platform, InstanceConfig, LibEntry, LoaderType, NativeEntry},
-    version::manifest::{check_library_rule, Rule},
+    version::manifest::{check_library_rule, fetch_version_manifest, Rule},
 };
 
 const FORGE_META_URL: &str =
@@ -162,7 +162,7 @@ pub async fn install_forge(
 
 
 pub async fn install_forge_like(
-    _mc_version: &str,
+    mc_version: &str,
     loader_version: &str,
     installer_url: &str,
     instance_name: &str,
@@ -176,7 +176,15 @@ pub async fn install_forge_like(
     fs::create_dir_all(&temp_dir).await?;
 
     let installer_path = temp_dir.join("forge-installer.jar");
-    download_file(&DownloadTask::new(installer_url, &installer_path)).await?;
+    let download = download_file(&DownloadTask::new(installer_url, &installer_path)).await;
+    if loader_type == LoaderType::Forge && matches!(&download, Err(HexoError::Network(error))
+        if error.status() == Some(reqwest::StatusCode::NOT_FOUND))
+    {
+        if let Some(classifier) = super::forge_jarmod::classifier(mc_version) {
+            return super::forge_jarmod::install(mc_version, loader_version, classifier, instance_name, base_dir).await;
+        }
+    }
+    download?;
 
     // Detect installer format: pre-1.13 has no processors and uses install + versionInfo.
     let profile_value: serde_json::Value =
@@ -221,6 +229,20 @@ async fn install_forge_modern(
         let lzma_path = temp_dir.join("client.lzma");
         extract_file_from_zip(installer_path, "data/client.lzma", &lzma_path).await?;
         let mc_jar = instance_dir.join(format!("{}.jar", config.version_id));
+        if install_profile.processors.iter().any(|processor| {
+            processor.sides.as_ref().is_none_or(|sides| sides.iter().any(|side| side == "client"))
+                && processor.args.windows(2).any(|args| args == ["--task", "DEOBF_REALMS"])
+        }) {
+            let manifest = fetch_version_manifest().await?;
+            let version = manifest
+                .versions
+                .iter()
+                .find(|version| version.id == config.version_id)
+                .ok_or_else(|| HexoError::VersionNotFound(config.version_id.clone()))?;
+            let metadata = DownloadTask::new(&version.url, mc_jar.with_extension("json"))
+                .with_sha1(&version.sha1);
+            download_file(&metadata).await?;
+        }
         run_processors(
             &install_profile.processors,
             &install_profile.data,
@@ -249,7 +271,59 @@ async fn install_forge_modern(
     config.loader_type = loader_type;
     new_lib_entries.append(&mut config.lib_list);
     config.lib_list = new_lib_entries;
+    prepare_forge_compatibility(&mut config, lib_dir, instance_dir).await?;
     config.save(instance_dir).await
+}
+
+/// Prepare verified compatibility files for Forge builds with older runtime dependencies.
+pub(crate) async fn prepare_forge_compatibility(
+    config: &mut InstanceConfig,
+    lib_dir: &Path,
+    instance_dir: &Path,
+) -> Result<()> {
+    if config.loader_type != LoaderType::Forge {
+        return Ok(());
+    }
+
+    let replacement = match config.version_id.as_str() {
+        "1.16.3" | "1.16.4" => Some((
+            if config.version_id == "1.16.3" {
+                "cpw.mods:modlauncher:8.0.6"
+            } else {
+                "cpw.mods:modlauncher:8.0.9"
+            },
+            "cpw.mods:modlauncher:8.1.3",
+            "6d0bfd78e025a87d43985e30907aa9ecbc51b2d6",
+        )),
+        _ => None,
+    };
+    if let Some((old_name, name, sha1)) = replacement {
+        if let Some(entry) = config.lib_list.iter_mut().find(|entry| entry.name == old_name) {
+            let path = resolve_maven_path(lib_dir, name);
+            let url = format!("https://maven.minecraftforge.net/{}", maven_relative_path(name));
+            download_file(&DownloadTask::new(url, &path).with_sha1(sha1)).await?;
+            *entry = LibEntry {
+                name: name.into(),
+                path,
+                sha1: sha1.into(),
+            };
+        }
+    }
+
+    let (url, relative_path, sha1) = match config.version_id.as_str() {
+        "1.5.2" => (
+            "https://files.prismlauncher.org/fmllibs/deobfuscation_data_1.5.2.zip",
+            ".minecraft/lib/deobfuscation_data_1.5.2.zip",
+            "446e55cd986582c70fcf12cb27bc00114c5adfd9",
+        ),
+        "1.7.2" => (
+            "https://maven.minecraftforge.net/net/minecraftforge/lex/legacyjavafixer/1.0/legacyjavafixer-1.0.jar",
+            ".minecraft/mods/legacyjavafixer-1.0.jar",
+            "a11b502bef19f49bfc199722b94da5f3d7b470a8",
+        ),
+        _ => return Ok(()),
+    };
+    download_file(&DownloadTask::new(url, instance_dir.join(relative_path)).with_sha1(sha1)).await
 }
 
 fn merge_forge_arguments(start_args: &mut Vec<String>, arguments: &ForgeVersionArgs) {
@@ -356,6 +430,7 @@ async fn install_forge_legacy(
     new_lib_entries.append(&mut config.lib_list);
     config.lib_list = new_lib_entries;
     config.natives.extend(new_native_entries);
+    prepare_forge_compatibility(&mut config, &lib_dir, &instance_dir).await?;
     config.save(&instance_dir).await?;
 
     Ok(())
@@ -654,7 +729,12 @@ fn get_jar_main_class(jar_path: &Path) -> Result<String> {
 }
 
 fn path_str(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
+    let path = p.to_string_lossy().replace('\\', "/");
+    if let Some(unc) = path.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else {
+        path.strip_prefix("//?/").map(str::to_owned).unwrap_or(path)
+    }
 }
 
 fn classpath_separator() -> &'static str {
@@ -666,6 +746,12 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+
+    #[test]
+    fn processor_paths_are_readable_by_java_on_windows() {
+        assert_eq!(path_str(Path::new(r"\\?\C:\games\file.jar")), "C:/games/file.jar");
+        assert_eq!(path_str(Path::new(r"\\?\UNC\host\share\file.jar")), "//host/share/file.jar");
+    }
 
     #[test]
     fn processor_error_keeps_only_the_last_lines() {
