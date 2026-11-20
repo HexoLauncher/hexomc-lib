@@ -327,7 +327,7 @@ pub async fn install_atlauncher_pack(
 
     install_pack_loader(&info, instance_name, base_dir, java_path, progress.clone()).await?;
 
-    install_config_files(&config, safe_name, version, instance_name, base_dir, include_optional, progress).await
+    install_config_files(&config, safe_name, version, instance_name, base_dir, include_optional, None, progress).await
 }
 
 /// Download and extract pack contents without installing Minecraft or its loader.
@@ -343,16 +343,17 @@ pub async fn install_atlauncher_pack_files(
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
     let config = fetch_atlauncher_pack_config(safe_name, version).await?;
-    install_config_files(&config, safe_name, version, instance_name, base_dir, include_optional, progress).await
+    install_config_files(&config, safe_name, version, instance_name, base_dir, include_optional, None, progress).await
 }
 
-async fn install_config_files(
+pub(super) async fn install_config_files(
     config: &AtPackConfig,
     safe_name: &str,
     version: &str,
     instance_name: &str,
     base_dir: &Path,
     include_optional: bool,
+    installed_game: Option<&Path>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
     let info = config.info(safe_name)?;
@@ -408,6 +409,7 @@ async fn install_config_files(
         tasks.push(task);
     }
 
+    super::state::reuse_downloads(&tasks, &game_dir, installed_game).await?;
     let p = progress.clone();
     download_batch(tasks, 8, move |d, t| p(d, t, "Downloading pack files")).await?;
 
@@ -470,7 +472,7 @@ mod tests {
                 {"name": "Forge patch", "file": "forge.jar", "type": "forge", "download": "browser"}]
         })).unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let result = install_config_files(&config, "Test", "1", "test", temp.path(), false, crate::no_progress()).await.unwrap();
+        let result = install_config_files(&config, "Test", "1", "test", temp.path(), false, None, crate::no_progress()).await.unwrap();
         let game = temp.path().join("instance/test/.minecraft");
         assert!(game.is_dir());
         assert_eq!(result.info.loader, LoaderType::Forge);

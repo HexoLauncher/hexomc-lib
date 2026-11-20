@@ -12,13 +12,16 @@ pub mod cfpack;
 pub mod ftbpack;
 pub mod hmclpack;
 pub mod mrpack;
+mod source;
+mod state;
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    path::{Component, Path, PathBuf},
+pub use source::{
+    download_modpack_archive, identify_modpack, inspect_modpack, modpack_file_sha1,
+    modpack_update_candidates, DownloadedModpack, IdentifiedModpack, ModpackPreview,
+    ModpackUpdateCandidates, OnlineModpack,
 };
 
-use serde::{Deserialize, Serialize};
+use std::path::{Component, Path, PathBuf};
 
 use crate::{
     error::{HexoError, Result},
@@ -102,14 +105,9 @@ pub struct ModpackUpdateResult {
     pub install: ModpackInstallResult,
     /// Files managed by the previous pack version and removed by this update.
     pub removed_files: Vec<PathBuf>,
+    /// Local changes or personal files kept in place when the pack overlapped with them.
+    pub preserved_files: Vec<PathBuf>,
 }
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct ModpackState {
-    managed_files: BTreeSet<String>,
-}
-
-const MODPACK_STATE_FILE: &str = "modpack_state.json";
 
 /// Detect a modpack's format from the zip contents.
 ///
@@ -150,11 +148,14 @@ pub async fn detect_modpack_format(pack_path: &Path) -> Result<ModpackFormat> {
     .map_err(|e| HexoError::Other(e.to_string()))?
 }
 
-/// Install a local modpack file, detecting its format.
-///
-/// `java_path`: needed by the Forge/NeoForge installers; None finds a Java matching the
-/// MC version automatically.
-/// `curseforge`: required for CurseForge modpacks.
+/// Select whether to install the game and loader in addition to pack contents.
+#[derive(Debug, Clone, Copy)]
+pub enum PackGameInstall<'a> {
+    FilesOnly,
+    WithGame { java_path: Option<&'a Path> },
+}
+
+/// Install a local archive and the Minecraft/loader versions it requires.
 pub async fn install_modpack(
     pack_path: &Path,
     instance_name: &str,
@@ -163,8 +164,7 @@ pub async fn install_modpack(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
-    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
-    let result = install_modpack_inner(
+    Ok(update_modpack(
         pack_path,
         instance_name,
         base_dir,
@@ -172,45 +172,11 @@ pub async fn install_modpack(
         curseforge,
         progress,
     )
-    .await?;
-    save_modpack_state(instance_name, base_dir, managed_files).await?;
-    Ok(result)
+    .await?
+    .install)
 }
 
-async fn install_modpack_inner(
-    pack_path: &Path,
-    instance_name: &str,
-    base_dir: &Path,
-    java_path: Option<&Path>,
-    curseforge: Option<&CurseForgeClient>,
-    progress: ProgressFn,
-) -> Result<ModpackInstallResult> {
-    match detect_modpack_format(pack_path).await? {
-        ModpackFormat::Modrinth => {
-            mrpack::install_mrpack(pack_path, instance_name, base_dir, java_path, progress).await
-        }
-        ModpackFormat::CurseForge => {
-            let cf = curseforge.ok_or_else(|| {
-                HexoError::Other("installing a CurseForge modpack requires a CurseForgeClient".into())
-            })?;
-            cfpack::install_cfpack(pack_path, instance_name, base_dir, java_path, cf, progress).await
-        }
-        ModpackFormat::Hmcl => {
-            hmclpack::install_hmcl_pack(pack_path, instance_name, base_dir, java_path, progress)
-                .await
-        }
-        ModpackFormat::Mcbbs => {
-            hmclpack::install_mcbbs_pack(pack_path, instance_name, base_dir, java_path, progress)
-                .await
-        }
-    }
-}
-
-/// Install or change a local modpack version in-place.
-///
-/// Minecraft and its loader are reinstalled when the new pack requests different
-/// versions. Files recorded from an earlier call are removed when the new manifest
-/// no longer contains them. Files added by the user are never included in that state.
+/// Apply a local archive and install the Minecraft/loader versions it requires.
 pub async fn update_modpack(
     pack_path: &Path,
     instance_name: &str,
@@ -219,38 +185,18 @@ pub async fn update_modpack(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackUpdateResult> {
-    let previous = load_modpack_state(instance_name, base_dir).await?;
-    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
-    let install = install_modpack_inner(
+    apply_archive(
         pack_path,
         instance_name,
         base_dir,
-        java_path,
+        PackGameInstall::WithGame { java_path },
         curseforge,
         progress,
     )
-    .await?;
-    let current = ModpackState { managed_files };
-    let game_dir = instance_game_dir(base_dir, instance_name);
-    let removed_files = remove_obsolete_managed_files(
-        &game_dir,
-        previous.as_ref().map(|state| &state.managed_files),
-        &current.managed_files,
-    )
-    .await?;
-
-    save_modpack_state(instance_name, base_dir, current.managed_files).await?;
-
-    Ok(ModpackUpdateResult {
-        install,
-        removed_files,
-    })
+    .await
 }
 
-/// Extract overrides and download pack files, detecting the local pack format.
-/// Minecraft and the mod loader are not installed; install them later with
-/// [`install_with_loader`] using the returned [`ModpackInfo`]. No Java is required.
-/// A CurseForge client is required for CurseForge archives.
+/// Install the files from a local archive without installing Minecraft or its loader.
 pub async fn install_modpack_files(
     pack_path: &Path,
     instance_name: &str,
@@ -258,14 +204,14 @@ pub async fn install_modpack_files(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
-    let result =
-        install_modpack_files_inner(pack_path, instance_name, base_dir, curseforge, progress)
-            .await?;
-    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
-    save_modpack_state(instance_name, base_dir, managed_files).await?;
-    Ok(result)
+    Ok(
+        update_modpack_files(pack_path, instance_name, base_dir, curseforge, progress)
+            .await?
+            .install,
+    )
 }
 
+/// Update the files from a local archive without installing Minecraft or its loader.
 pub async fn update_modpack_files(
     pack_path: &Path,
     instance_name: &str,
@@ -273,168 +219,216 @@ pub async fn update_modpack_files(
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
 ) -> Result<ModpackUpdateResult> {
-    let previous = load_modpack_state(instance_name, base_dir).await?;
-    let managed_files = managed_files_for_local(pack_path, curseforge).await?;
-    let install =
-        install_modpack_files_inner(pack_path, instance_name, base_dir, curseforge, progress)
-            .await?;
-    let game_dir = instance_game_dir(base_dir, instance_name);
-    let removed_files = remove_obsolete_managed_files(
-        &game_dir,
-        previous.as_ref().map(|state| &state.managed_files),
-        &managed_files,
+    apply_archive(
+        pack_path,
+        instance_name,
+        base_dir,
+        PackGameInstall::FilesOnly,
+        curseforge,
+        progress,
     )
-    .await?;
-    save_modpack_state(instance_name, base_dir, managed_files).await?;
-
-    Ok(ModpackUpdateResult {
-        install,
-        removed_files,
-    })
+    .await
 }
 
-async fn install_modpack_files_inner(
+async fn apply_archive(
     pack_path: &Path,
     instance_name: &str,
     base_dir: &Path,
+    game_install: PackGameInstall<'_>,
     curseforge: Option<&CurseForgeClient>,
     progress: ProgressFn,
-) -> Result<ModpackInstallResult> {
-    match detect_modpack_format(pack_path).await? {
-        ModpackFormat::Modrinth => {
-            mrpack::install_mrpack_files(pack_path, instance_name, base_dir, progress).await
-        }
-        ModpackFormat::CurseForge => {
-            let cf = curseforge.ok_or_else(|| {
-                HexoError::Other("installing a CurseForge modpack requires a CurseForgeClient".into())
-            })?;
-            cfpack::install_cfpack_files(pack_path, instance_name, base_dir, cf, progress).await
-        }
-        ModpackFormat::Hmcl => {
-            hmclpack::install_hmcl_pack_files(pack_path, instance_name, base_dir, progress).await
-        }
-        ModpackFormat::Mcbbs => {
-            hmclpack::install_mcbbs_pack_files(pack_path, instance_name, base_dir, progress).await
-        }
-    }
-}
-
-async fn managed_files_for_local(
-    pack_path: &Path,
-    curseforge: Option<&CurseForgeClient>,
-) -> Result<BTreeSet<String>> {
-    match detect_modpack_format(pack_path).await? {
-        ModpackFormat::Modrinth => {
-            let index = mrpack::read_mrpack_index(pack_path).await?;
-            index
-                .files
-                .iter()
-                .filter(|file| file.is_client_supported())
-                .map(|file| normalize_managed_path(&file.path))
-                .collect::<Result<_>>()
-        }
-        ModpackFormat::CurseForge => {
-            let client = curseforge.ok_or_else(|| {
-                HexoError::Other("updating a CurseForge modpack requires a CurseForgeClient".into())
-            })?;
-            let manifest = cfpack::read_cf_manifest(pack_path).await?;
-            let wanted: Vec<_> = manifest.files.iter().filter(|file| file.required).collect();
-            if wanted.is_empty() {
-                return Ok(BTreeSet::new());
+) -> Result<ModpackUpdateResult> {
+    let format = detect_modpack_format(pack_path).await?;
+    apply_pack(
+        instance_name,
+        base_dir,
+        game_install,
+        progress,
+        |base, installed_game, progress| async move {
+            match format {
+                ModpackFormat::Modrinth => {
+                    mrpack::stage_mrpack_files(
+                        pack_path,
+                        "staged",
+                        &base,
+                        Some(&installed_game),
+                        progress,
+                    )
+                    .await
+                }
+                ModpackFormat::CurseForge => {
+                    let client = curseforge.ok_or_else(|| {
+                        HexoError::Other("a CurseForge modpack requires a CurseForgeClient".into())
+                    })?;
+                    cfpack::stage_cfpack_files(
+                        pack_path,
+                        "staged",
+                        &base,
+                        client,
+                        Some(&installed_game),
+                        progress,
+                    )
+                    .await
+                }
+                ModpackFormat::Hmcl => {
+                    hmclpack::install_hmcl_pack_files(pack_path, "staged", &base, progress).await
+                }
+                ModpackFormat::Mcbbs => {
+                    hmclpack::install_mcbbs_pack_files(pack_path, "staged", &base, progress).await
+                }
             }
-            let file_ids: Vec<_> = wanted.iter().map(|file| file.file_id).collect();
-            let project_ids: Vec<_> = wanted.iter().map(|file| file.project_id).collect();
-            let projects: HashMap<_, _> = client
-                .get_mods(&project_ids)
-                .await?
-                .into_iter()
-                .map(|project| (project.id, project))
-                .collect();
-            client
-                .get_files(&file_ids)
-                .await?
-                .into_iter()
-                .map(|file| {
-                    let directory = match projects.get(&file.mod_id).and_then(|p| p.class_id) {
-                        Some(12) => "resourcepacks",
-                        Some(6552) => "shaderpacks",
-                        _ => "mods",
-                    };
-                    normalize_managed_path(&format!("{directory}/{}", file.file_name))
-                })
-                .collect::<Result<_>>()
-        }
-        ModpackFormat::Hmcl | ModpackFormat::Mcbbs => Ok(BTreeSet::new()),
-    }
+        },
+    )
+    .await
 }
 
-async fn save_modpack_state(
+/// Install or update a manifest-based online pack, keeping existing local modifications.
+pub async fn apply_online_modpack(
+    pack: &OnlineModpack,
     instance_name: &str,
     base_dir: &Path,
-    managed_files: BTreeSet<String>,
-) -> Result<()> {
-    let state = ModpackState { managed_files };
-    let state_path = modpack_state_path(instance_name, base_dir);
-    if let Some(parent) = state_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(state_path, serde_json::to_vec_pretty(&state)?).await?;
-    Ok(())
+    game_install: PackGameInstall<'_>,
+    curseforge: Option<&CurseForgeClient>,
+    include_optional: bool,
+    progress: ProgressFn,
+) -> Result<ModpackUpdateResult> {
+    apply_pack(
+        instance_name,
+        base_dir,
+        game_install,
+        progress,
+        |base, installed_game, progress| async move {
+            match pack {
+                OnlineModpack::AtLauncher {
+                    name,
+                    version,
+                    config,
+                } => {
+                    atpack::install_config_files(
+                        config,
+                        name,
+                        version,
+                        "staged",
+                        &base,
+                        include_optional,
+                        Some(&installed_game),
+                        progress,
+                    )
+                    .await
+                }
+                OnlineModpack::Ftb { name, manifest } => {
+                    ftbpack::install_manifest_files(
+                        manifest,
+                        name,
+                        "staged",
+                        &base,
+                        curseforge,
+                        include_optional,
+                        Some(&installed_game),
+                        progress,
+                    )
+                    .await
+                }
+            }
+        },
+    )
+    .await
 }
 
-async fn load_modpack_state(
+static PACK_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn apply_pack<F, Fut>(
     instance_name: &str,
     base_dir: &Path,
-) -> Result<Option<ModpackState>> {
-    let path = modpack_state_path(instance_name, base_dir);
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+    game_install: PackGameInstall<'_>,
+    progress: ProgressFn,
+    stage: F,
+) -> Result<ModpackUpdateResult>
+where
+    F: FnOnce(PathBuf, PathBuf, ProgressFn) -> Fut,
+    Fut: std::future::Future<Output = Result<ModpackInstallResult>>,
+{
+    let instance = pack_instance_dir(base_dir, instance_name)?;
+    tokio::fs::create_dir_all(&instance).await?;
+    let staging = tempfile::Builder::new()
+        .prefix(".pack-stage-")
+        .tempdir_in(&instance)?;
+    let staged_game = instance_game_dir(staging.path(), "staged");
+    let installed_game = safe_join(&instance, ".minecraft")?;
+    let install = stage(staging.path().to_owned(), installed_game, progress.clone()).await?;
+    let lock = PACK_WRITE.lock().await;
+    if let PackGameInstall::WithGame { java_path } = game_install {
+        install_pack_loader(
+            &install.info,
+            instance_name,
+            base_dir,
+            java_path,
+            progress.clone(),
+        )
+        .await?;
     }
+    progress(0, 0, "Applying modpack files");
+    tokio::task::spawn_blocking(move || {
+        let _staging = staging;
+        let _lock = lock;
+        state::apply(&instance, &staged_game, install)
+    })
+    .await
+    .map_err(|error| HexoError::Other(error.to_string()))?
 }
 
-fn modpack_state_path(instance_name: &str, base_dir: &Path) -> PathBuf {
-    base_dir
-        .join("instance")
-        .join(instance_name)
-        .join(MODPACK_STATE_FILE)
-}
-
-fn normalize_managed_path(path: &str) -> Result<String> {
-    let path = path.replace('\\', "/");
-    if path.is_empty() {
-        return Err(HexoError::Other("empty path in modpack manifest".into()));
+fn pack_instance_dir(base_dir: &Path, instance_name: &str) -> Result<PathBuf> {
+    let mut name = Path::new(instance_name).components();
+    if !matches!(
+        (name.next(), name.next()),
+        (Some(Component::Normal(_)), None)
+    ) {
+        return Err(HexoError::Other(format!(
+            "invalid instance name: {instance_name}"
+        )));
     }
-    let root = Path::new(".");
-    let safe = safe_join(root, &path)?;
-    Ok(safe
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/"))
+    safe_join(base_dir, &format!("instance/{instance_name}"))
 }
 
-async fn remove_obsolete_managed_files(
-    game_dir: &Path,
-    previous: Option<&BTreeSet<String>>,
-    current: &BTreeSet<String>,
-) -> Result<Vec<PathBuf>> {
-    let mut removed = Vec::new();
-    let Some(previous) = previous else {
-        return Ok(removed);
+/// List absent files recorded by the pack. Disabled mods count as present.
+pub async fn missing_modpack_files(base_dir: &Path, instance_name: &str) -> Result<Vec<String>> {
+    let instance = pack_instance_dir(base_dir, instance_name)?;
+    tokio::task::spawn_blocking(move || state::missing_files(&instance))
+        .await
+        .map_err(|error| HexoError::Other(error.to_string()))?
+}
+
+/// Determine whether the installed versions already meet the pack's requirements.
+pub fn modpack_game_matches(
+    current_mc: &str,
+    current_loader: &LoaderType,
+    current_version: &str,
+    target_mc: &str,
+    target_loader: &LoaderType,
+    target_version: Option<&str>,
+) -> bool {
+    if current_mc != target_mc || current_loader != target_loader {
+        return false;
+    }
+    if *target_loader == LoaderType::Vanilla {
+        return true;
+    }
+    let Some(wanted) = target_version.filter(|version| !version.is_empty()) else {
+        return false;
     };
-    for relative in previous.difference(current) {
-        let path = safe_join(game_dir, relative)?;
-        if path.is_file() {
-            tokio::fs::remove_file(&path).await?;
-            removed.push(path);
-        }
+    if current_version == wanted {
+        return true;
     }
-    Ok(removed)
+    if *target_loader != LoaderType::Forge {
+        return false;
+    }
+    let bare = wanted
+        .strip_prefix(&format!("{target_mc}-"))
+        .unwrap_or(wanted);
+    let full = format!("{target_mc}-{bare}");
+    current_version == bare
+        || current_version == full
+        || current_version.starts_with(&format!("{full}-"))
 }
 
 pub(crate) fn instance_game_dir(base_dir: &Path, instance_name: &str) -> PathBuf {
@@ -515,6 +509,38 @@ pub(crate) fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
         .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
     {
         return Err(HexoError::Other(format!("unsafe path in modpack: {}", relative)));
+    }
+    #[cfg(windows)]
+    if rel.components().any(|part| match part {
+        Component::Normal(name) => {
+            let name = name.to_string_lossy();
+            let stem = name
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_uppercase();
+            name.contains(':')
+                || name.ends_with([' ', '.'])
+                || matches!(
+                    stem.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+                )
+                || stem
+                    .strip_prefix("COM")
+                    .or_else(|| stem.strip_prefix("LPT"))
+                    .is_some_and(|suffix| {
+                        matches!(
+                            suffix,
+                            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                        )
+                    })
+        }
+        _ => false,
+    }) {
+        return Err(HexoError::Other(format!(
+            "unsafe path in modpack: {}",
+            relative
+        )));
     }
     let joined = root.join(rel);
     for ancestor in joined.ancestors() {
@@ -667,6 +693,247 @@ mod tests {
         }
     }
 
+    fn write_pack(path: &Path, version: &str, files: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let mut pack = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        pack.start_file(mrpack::INDEX_FILE, options).unwrap();
+        write!(
+            pack,
+            "{}",
+            serde_json::json!({
+                "formatVersion": 1, "game": "minecraft", "versionId": version,
+                "name": "Pack", "files": [], "dependencies": {"minecraft": "1.21.1"},
+            })
+        )
+        .unwrap();
+        for (file, content) in files {
+            pack.start_file(format!("overrides/{file}"), options)
+                .unwrap();
+            pack.write_all(content).unwrap();
+        }
+        pack.finish().unwrap();
+    }
+
+    #[tokio::test]
+    async fn updates_clean_files_and_preserves_personal_edits_across_retries() {
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path();
+        let first = base.join("first.mrpack");
+        let second = base.join("second.mrpack");
+        write_pack(
+            &first,
+            "1",
+            &[
+                ("config/edited.toml", b"default"),
+                ("config/clean.toml", b"one"),
+                ("config/removed.toml", b"unused"),
+                ("config/edited-removed.toml", b"unused"),
+                ("mods/disabled.jar", b"old jar"),
+            ],
+        );
+        write_pack(
+            &second,
+            "2",
+            &[
+                ("config/edited.toml", b"new defaults"),
+                ("config/clean.toml", b"two"),
+                ("config/new.toml", b"new"),
+                ("mods/disabled.jar", b"new jar"),
+            ],
+        );
+        install_modpack_files(&first, "test", base, None, crate::no_progress())
+            .await
+            .unwrap();
+        let game = instance_game_dir(base, "test");
+        std::fs::write(game.join("config/edited.toml"), b"my settings").unwrap();
+        std::fs::write(game.join("config/edited-removed.toml"), b"keep me").unwrap();
+        std::fs::write(game.join("mods/personal.jar"), b"my mod").unwrap();
+        std::fs::rename(
+            game.join("mods/disabled.jar"),
+            game.join("mods/disabled.jar.disabled"),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let result = update_modpack_files(&second, "test", base, None, crate::no_progress())
+                .await
+                .unwrap();
+            assert!(result
+                .preserved_files
+                .contains(&game.join("config/edited.toml")));
+            assert_eq!(
+                std::fs::read(game.join("config/edited.toml")).unwrap(),
+                b"my settings"
+            );
+            assert_eq!(
+                std::fs::read(game.join("config/clean.toml")).unwrap(),
+                b"two"
+            );
+            assert_eq!(
+                std::fs::read(game.join("config/edited-removed.toml")).unwrap(),
+                b"keep me"
+            );
+            assert!(!game.join("config/removed.toml").exists());
+            assert_eq!(
+                std::fs::read(game.join("mods/personal.jar")).unwrap(),
+                b"my mod"
+            );
+            assert_eq!(
+                std::fs::read(game.join("mods/disabled.jar.disabled")).unwrap(),
+                b"new jar"
+            );
+            assert!(!game.join("mods/disabled.jar").exists());
+            assert!(missing_modpack_files(base, "test")
+                .await
+                .unwrap()
+                .is_empty());
+        }
+        std::fs::remove_file(game.join("config/new.toml")).unwrap();
+        assert_eq!(
+            missing_modpack_files(base, "test").await.unwrap(),
+            ["config/new.toml"]
+        );
+        update_modpack_files(&second, "test", base, None, crate::no_progress())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(game.join("config/new.toml")).unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn legacy_state_keeps_unverified_files() {
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path();
+        let archive = base.join("test.mrpack");
+        write_pack(&archive, "2", &[("config/conflict.toml", b"defaults")]);
+        let game = instance_game_dir(base, "test");
+        std::fs::create_dir_all(game.join("config")).unwrap();
+        std::fs::write(game.join("config/conflict.toml"), b"personal").unwrap();
+        std::fs::write(game.join("config/removed.toml"), b"old").unwrap();
+        std::fs::write(
+            game.parent().unwrap().join("modpack_state.json"),
+            r#"{"managed_files":["config/removed.toml"]}"#,
+        )
+        .unwrap();
+        let result = update_modpack_files(&archive, "test", base, None, crate::no_progress())
+            .await
+            .unwrap();
+        assert_eq!(result.preserved_files.len(), 2);
+        assert_eq!(
+            std::fs::read(game.join("config/conflict.toml")).unwrap(),
+            b"personal"
+        );
+        assert_eq!(
+            std::fs::read(game.join("config/removed.toml")).unwrap(),
+            b"old"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_apply_restores_previous_files_and_state() {
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path();
+        let archive = base.join("pack.mrpack");
+        write_pack(&archive, "1", &[("config/a.toml", b"old config")]);
+        install_modpack_files(&archive, "test", base, None, crate::no_progress())
+            .await
+            .unwrap();
+        let game = instance_game_dir(base, "test");
+        let state = game.parent().unwrap().join("modpack_state.json");
+        let original_state = std::fs::read(&state).unwrap();
+        std::fs::write(game.join("z"), b"personal file").unwrap();
+        write_pack(
+            &archive,
+            "2",
+            &[("config/a.toml", b"new config"), ("z/x.toml", b"new")],
+        );
+        assert!(
+            update_modpack_files(&archive, "test", base, None, crate::no_progress())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(game.join("config/a.toml")).unwrap(),
+            b"old config"
+        );
+        assert_eq!(std::fs::read(game.join("z")).unwrap(), b"personal file");
+        assert_eq!(std::fs::read(state).unwrap(), original_state);
+    }
+
+    #[tokio::test]
+    async fn update_reuses_checked_downloads_and_respects_personal_mod_ids() {
+        use std::io::{Cursor, Write};
+        fn jar_bytes(id: &str, version: &str) -> Vec<u8> {
+            let mut jar = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            jar.start_file("fabric.mod.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            write!(jar, "{{\"id\":\"{id}\",\"version\":\"{version}\"}}").unwrap();
+            jar.finish().unwrap().into_inner()
+        }
+
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path();
+        let initial = base.join("initial.mrpack");
+        let updated = base.join("updated.mrpack");
+        write_pack(
+            &initial,
+            "1",
+            &[
+                ("mods/managed-1.jar", &jar_bytes("managed", "1")),
+                ("mods/cache.jar", b"cached download"),
+            ],
+        );
+        install_modpack_files(&initial, "test", base, None, crate::no_progress())
+            .await
+            .unwrap();
+        let game = instance_game_dir(base, "test");
+        std::fs::rename(
+            game.join("mods/managed-1.jar"),
+            game.join("mods/managed-1.jar.disabled"),
+        )
+        .unwrap();
+        std::fs::write(game.join("mods/my-version.jar"), jar_bytes("personal", "0")).unwrap();
+        let hash = state::sha1_file(&game.join("mods/cache.jar")).unwrap();
+        {
+            let mut archive = zip::ZipWriter::new(std::fs::File::create(&updated).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            archive.start_file(mrpack::INDEX_FILE, options).unwrap();
+            write!(
+                archive,
+                "{}",
+                serde_json::json!({
+                    "formatVersion": 1, "game": "minecraft", "versionId": "2", "name": "Pack",
+                    "files": [{
+                        "path": "mods/cache.jar", "hashes": {"sha1": hash},
+                        "downloads": ["https://invalid.invalid/cache.jar"]
+                    }],
+                    "dependencies": {"minecraft": "1.21.1"},
+                })
+            )
+            .unwrap();
+            for (name, id) in [("managed-2", "managed"), ("pack-version", "personal")] {
+                archive
+                    .start_file(format!("overrides/mods/{name}.jar"), options)
+                    .unwrap();
+                archive.write_all(&jar_bytes(id, "2")).unwrap();
+            }
+            archive.finish().unwrap();
+        }
+        let result = update_modpack_files(&updated, "test", base, None, crate::no_progress())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.removed_files,
+            [game.join("mods/managed-1.jar.disabled")]
+        );
+        assert_eq!(result.preserved_files, [game.join("mods/my-version.jar")]);
+        assert!(game.join("mods/managed-2.jar.disabled").is_file());
+        assert!(!game.join("mods/pack-version.jar").exists());
+        assert!(missing_modpack_files(base, "test")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn every_format_rejects_neoforge_1_20_1_in_info() {
         use serde_json::json;
@@ -698,40 +965,6 @@ mod tests {
         assert!(safe_join(root, "../evil.jar").is_err());
         assert!(safe_join(root, "mods/../../evil.jar").is_err());
         assert!(safe_join(root, "/etc/passwd").is_err());
-    }
-
-    #[tokio::test]
-    async fn modpack_update_removes_only_obsolete_managed_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let game = temp.path();
-        std::fs::create_dir_all(game.join("mods")).unwrap();
-        std::fs::write(game.join("mods/old.jar"), b"old").unwrap();
-        std::fs::write(game.join("mods/kept.jar"), b"kept").unwrap();
-        std::fs::write(game.join("mods/user.jar"), b"user").unwrap();
-
-        let previous = BTreeSet::from([
-            "mods/old.jar".to_string(),
-            "mods/kept.jar".to_string(),
-        ]);
-        let current = BTreeSet::from(["mods/kept.jar".to_string()]);
-        let removed = remove_obsolete_managed_files(game, Some(&previous), &current)
-            .await
-            .unwrap();
-
-        assert_eq!(removed, vec![game.join("mods/old.jar")]);
-        assert!(!game.join("mods/old.jar").exists());
-        assert!(game.join("mods/kept.jar").exists());
-        assert!(game.join("mods/user.jar").exists());
-    }
-
-    #[test]
-    fn managed_paths_are_normalized_and_cannot_escape() {
-        assert_eq!(
-            normalize_managed_path("mods\\example.jar").unwrap(),
-            "mods/example.jar"
-        );
-        assert!(normalize_managed_path("../outside.jar").is_err());
-        assert!(normalize_managed_path("").is_err());
     }
 
     #[tokio::test]

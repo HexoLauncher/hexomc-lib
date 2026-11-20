@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use toml::Value as Toml;
 
@@ -167,17 +167,24 @@ impl Meta {
     }
 }
 
-fn read_text(archive: &mut Jar, name: &str) -> Option<String> {
-    let mut entry = archive.by_name(name).ok()?;
+fn read_text(archive: &mut zip::ZipArchive<impl Read + Seek>, name: &str) -> Option<String> {
+    const MAX_METADATA: u64 = 4 * 1024 * 1024;
+    let entry = archive.by_name(name).ok()?;
+    if entry.size() > MAX_METADATA {
+        return None;
+    }
     let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).ok()?;
+    entry.take(MAX_METADATA + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_METADATA {
+        return None;
+    }
     let text = String::from_utf8_lossy(&bytes);
     Some(text.trim_start_matches('\u{feff}').to_string())
 }
 
 /// Many mods put raw newlines inside json strings; retry with control
 /// characters replaced when strict parsing fails.
-fn read_json(archive: &mut Jar, name: &str) -> Option<Json> {
+fn read_json(archive: &mut zip::ZipArchive<impl Read + Seek>, name: &str) -> Option<Json> {
     let text = read_text(archive, name)?;
     serde_json::from_str(&text).ok().or_else(|| {
         let relaxed: String = text
@@ -186,6 +193,86 @@ fn read_json(archive: &mut Jar, name: &str) -> Option<Json> {
             .collect();
         serde_json::from_str(&relaxed).ok()
     })
+}
+
+pub(super) fn provided_mod_ids(path: &Path, info: &ModInfo) -> Vec<(String, String)> {
+    let mut ids = std::collections::BTreeMap::from([(info.mod_id.clone(), info.version.clone())]);
+    if let Ok(mut jar) = File::open(path).and_then(|file| {
+        zip::ZipArchive::new(file).map_err(std::io::Error::other)
+    }) {
+        collect_provided_ids(&mut jar, &mut ids, 0, &mut (64 * 1024 * 1024));
+    }
+    ids.into_iter().collect()
+}
+
+fn collect_provided_ids(
+    archive: &mut zip::ZipArchive<impl Read + Seek>,
+    ids: &mut std::collections::BTreeMap<String, String>,
+    depth: u8,
+    budget: &mut u64,
+) {
+    if depth > 3 {
+        return;
+    }
+    let metadata = read_json(archive, "fabric.mod.json").or_else(|| {
+        read_json(archive, "quilt.mod.json")?.get("quilt_loader").cloned()
+    });
+    let mut nested = Vec::new();
+    if let Some(metadata) = metadata {
+        if let Some(id) = json_str(&metadata, "id") {
+            let version = json_str(&metadata, "version").unwrap_or_default();
+            ids.entry(id).or_insert_with(|| version.clone());
+            if let Some(provides) = metadata.get("provides").and_then(Json::as_array) {
+                for provided in provides {
+                    let id = non_empty(provided.as_str()).or_else(|| json_str(provided, "id"));
+                    if let Some(id) = id {
+                        let version = json_str(provided, "version").unwrap_or_else(|| version.clone());
+                        ids.entry(id).or_insert(version);
+                    }
+                }
+            }
+        }
+        if let Some(jars) = metadata.get("jars").and_then(Json::as_array) {
+            nested.extend(jars.iter().filter_map(|jar| {
+                non_empty(jar.as_str()).or_else(|| json_str(jar, "file"))
+            }));
+        }
+    }
+    for name in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+        if let Some(parsed) = read_text(archive, name).and_then(|text| toml::from_str::<Toml>(&text).ok()) {
+            if let Some(mods) = parsed.get("mods").and_then(Toml::as_array) {
+                for entry in mods {
+                    if let Some(id) = toml_str(entry, "modId") {
+                        let version = toml_str(entry, "version").unwrap_or_default();
+                        ids.entry(id).or_insert(version);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(metadata) = read_json(archive, "META-INF/jarjar/metadata.json") {
+        if let Some(jars) = metadata.get("jars").and_then(Json::as_array) {
+            nested.extend(jars.iter().filter_map(|jar| json_str(jar, "path")));
+        }
+    }
+    for path in nested {
+        let Ok(mut entry) = archive.by_name(&path) else { continue };
+        if entry.size() > *budget || depth == 3 {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let limit = *budget;
+        if entry.by_ref().take(limit + 1).read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        *budget = budget.saturating_sub(bytes.len() as u64);
+        if bytes.len() as u64 > limit {
+            continue;
+        }
+        if let Ok(mut nested) = zip::ZipArchive::new(Cursor::new(bytes)) {
+            collect_provided_ids(&mut nested, ids, depth + 1, budget);
+        }
+    }
 }
 
 fn non_empty(s: Option<&str>) -> Option<String> {
@@ -392,6 +479,9 @@ fn read_mods_toml(archive: &mut Jar, file: &str, default_loader: ModLoader) -> O
         .into_iter()
         .flatten()
         .filter_map(|dep| {
+            if dep.get("side").and_then(Toml::as_str).is_some_and(|side| side.eq_ignore_ascii_case("server")) {
+                return None;
+            }
             // Forge uses `mandatory`, NeoForge uses `type`.
             let kind = match dep.get("type").and_then(Toml::as_str) {
                 Some(t) if t.eq_ignore_ascii_case("required") => DependencyKind::Required,

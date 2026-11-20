@@ -55,6 +55,10 @@ pub use auth::session::join_server;
 pub use mods::detector::{
     detect_mods, read_mod_icon, read_mod_info, DependencyKind, ModDependency, ModInfo, ModLoader,
 };
+pub use mods::dependencies::{
+    inspect_mod_dependencies, DependencyProvider, DependencyStatus, ModDependencyEdge,
+    ModDependencyReport,
+};
 pub use mods::curseforge::{
     curseforge_fingerprint, file_curseforge_fingerprint, CfFingerprintMatch, CurseForgeClient,
 };
@@ -72,9 +76,12 @@ pub use browse::{
 };
 
 pub use modpack::{
-    detect_modpack_format, install_modpack, install_modpack_files, resolve_forge_version,
-    update_modpack, update_modpack_files, ManualDownload, ModpackFormat, ModpackInfo,
-    ModpackInstallResult, ModpackUpdateResult,
+    apply_online_modpack, detect_modpack_format, download_modpack_archive, identify_modpack,
+    inspect_modpack, install_modpack, install_modpack_files, missing_modpack_files, modpack_file_sha1,
+    modpack_game_matches, modpack_update_candidates, resolve_forge_version, update_modpack,
+    update_modpack_files, DownloadedModpack, IdentifiedModpack, ManualDownload, ModpackFormat,
+    ModpackInfo, ModpackInstallResult, ModpackPreview, ModpackUpdateCandidates, ModpackUpdateResult,
+    OnlineModpack, PackGameInstall,
 };
 pub use modpack::mrpack::{install_mrpack, install_mrpack_files, read_mrpack_index, MrpackIndex};
 pub use modpack::cfpack::{install_cfpack, install_cfpack_files, read_cf_manifest, CfManifest};

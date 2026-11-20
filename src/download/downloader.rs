@@ -68,7 +68,7 @@ pub async fn verify_sha256(path: &Path, expected: &str) -> bool {
 }
 
 /// Check every checksum supplied by the caller.
-async fn verify_task(task: &DownloadTask) -> bool {
+pub(crate) async fn verify_task(task: &DownloadTask) -> bool {
     if task.sha1.is_none() && task.sha256.is_none() {
         return false;
     }

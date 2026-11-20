@@ -16,3 +16,4 @@ pub use resolve::{
     DependencyRelation, LocalMatch, LocalMod, RemoteDependency, ResolvedMod,
 };
 pub use updater::{check_updates, update_mod, ModUpdate, UpdateSource};
+pub mod dependencies;

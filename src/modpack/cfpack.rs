@@ -148,6 +148,17 @@ pub async fn install_cfpack_files(
     curseforge: &CurseForgeClient,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
+    stage_cfpack_files(pack_path, instance_name, base_dir, curseforge, None, progress).await
+}
+
+pub(super) async fn stage_cfpack_files(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    curseforge: &CurseForgeClient,
+    installed_game: Option<&Path>,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
     let manifest = read_cf_manifest(pack_path).await?;
     let info = manifest.info()?;
 
@@ -205,6 +216,7 @@ pub async fn install_cfpack_files(
         }
     }
 
+    super::state::reuse_downloads(&tasks, &game_dir, installed_game).await?;
     let p = progress.clone();
     download_batch(tasks, 8, move |d, t| p(d, t, "Downloading modpack files")).await?;
 

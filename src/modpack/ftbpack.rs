@@ -289,7 +289,7 @@ pub async fn install_ftb_pack(
     let info = manifest.info(&pack.name)?;
     install_pack_loader(&info, instance_name, base_dir, java_path, progress.clone()).await?;
 
-    install_manifest_files(&manifest, &pack.name, instance_name, base_dir, curseforge, include_optional, progress).await
+    install_manifest_files(&manifest, &pack.name, instance_name, base_dir, curseforge, include_optional, None, progress).await
 }
 
 /// Download pack contents without installing Minecraft or its loader.
@@ -307,16 +307,17 @@ pub async fn install_ftb_pack_files(
 ) -> Result<ModpackInstallResult> {
     let pack = get_ftb_pack(pack_id).await?;
     let manifest = fetch_ftb_version_manifest(pack_id, version_id).await?;
-    install_manifest_files(&manifest, &pack.name, instance_name, base_dir, curseforge, include_optional, progress).await
+    install_manifest_files(&manifest, &pack.name, instance_name, base_dir, curseforge, include_optional, None, progress).await
 }
 
-async fn install_manifest_files(
+pub(super) async fn install_manifest_files(
     manifest: &FtbVersionManifest,
     pack_name: &str,
     instance_name: &str,
     base_dir: &Path,
     curseforge: Option<&CurseForgeClient>,
     include_optional: bool,
+    installed_game: Option<&Path>,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
     let info = manifest.info(pack_name)?;
@@ -360,6 +361,7 @@ async fn install_manifest_files(
         };
         resolve_files(wanted, &files, &projects, &mut tasks, &mut manual_downloads);
     }
+    super::state::reuse_downloads(&tasks, &game_dir, installed_game).await?;
     download_batch(tasks, 8, move |d, t| {
         progress(d, t, "Downloading pack files")
     })
@@ -403,7 +405,7 @@ mod tests {
         let mut manifest = manifest();
         manifest.files.clear();
         let temp = tempfile::tempdir().unwrap();
-        let result = install_manifest_files(&manifest, "Test", "test", temp.path(), None, false, crate::no_progress()).await.unwrap();
+        let result = install_manifest_files(&manifest, "Test", "test", temp.path(), None, false, None, crate::no_progress()).await.unwrap();
         assert_eq!(result.info.loader, LoaderType::NeoForge);
         assert!(temp.path().join("instance/test/.minecraft").is_dir());
         assert!(!temp.path().join("instance/test/instance_config.json").exists());
@@ -509,7 +511,7 @@ mod tests {
         let mut manifest = manifest();
         manifest.targets[0].version = "1.20.1".into();
         let temp = tempfile::tempdir().unwrap();
-        let result = install_manifest_files(&manifest, "Test", "test", temp.path(), None, false, crate::no_progress()).await;
+        let result = install_manifest_files(&manifest, "Test", "test", temp.path(), None, false, None, crate::no_progress()).await;
         assert!(
             matches!(result, Err(HexoError::UnsupportedLoader(message)) if message.contains("NeoForge for 1.20.1"))
         );

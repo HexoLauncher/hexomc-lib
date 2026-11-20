@@ -136,6 +136,16 @@ pub async fn install_mrpack_files(
     base_dir: &Path,
     progress: ProgressFn,
 ) -> Result<ModpackInstallResult> {
+    stage_mrpack_files(pack_path, instance_name, base_dir, None, progress).await
+}
+
+pub(super) async fn stage_mrpack_files(
+    pack_path: &Path,
+    instance_name: &str,
+    base_dir: &Path,
+    installed_game: Option<&Path>,
+    progress: ProgressFn,
+) -> Result<ModpackInstallResult> {
     let index = read_mrpack_index(pack_path).await?;
     if index.game != "minecraft" {
         return Err(HexoError::Other(format!("unsupported game: {}", index.game)));
@@ -161,6 +171,7 @@ pub async fn install_mrpack_files(
         tasks.push(task);
     }
 
+    super::state::reuse_downloads(&tasks, &game_dir, installed_game).await?;
     let p = progress.clone();
     download_batch(tasks, 8, move |d, t| p(d, t, "Downloading modpack files")).await?;
 
